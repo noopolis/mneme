@@ -305,7 +305,7 @@ export class SQLiteMemoryIndex {
     let searchScore = "0";
     if (queryTokens.length > 0) {
       if (this.useFtsFallback() && this.tableExists("memory_events_fts")) {
-        const match = queryTokens.join(" ");
+        const match = queryTokens.map((token) => `${token}*`).join(" ");
         where.push(`e.event_id IN (SELECT event_id FROM memory_events_fts WHERE memory_events_fts MATCH ?)`);
         whereParams.push(match);
         searchScore = "1.0";
