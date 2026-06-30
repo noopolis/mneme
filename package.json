@@ -1,0 +1,53 @@
+{
+  "name": "@noopolis/mneme",
+  "version": "0.1.0",
+  "description": "Noopolis scoped memory runtime and MCP tools for agentic systems.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "mneme": "dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/noopolis/mneme.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc --project tsconfig.build.json && chmod +x dist/cli/index.js",
+    "clean": "rm -rf dist",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
