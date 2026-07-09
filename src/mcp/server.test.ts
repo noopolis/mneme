@@ -9,6 +9,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { memoryScopeId } from "../identity/ids.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { getDreamMemoryToolInstructions } from "../contract/toolDescriptors.js";
 import { createMnemeMcpServer } from "./server.js";
 
 const tempRoots: string[] = [];
@@ -83,6 +84,41 @@ test("MCP server lists and calls Mneme memory tools through the protocol", async
     assert.equal(parsed.tool, "memory.search");
     assert.equal(parsed.audit.transport, "mcp");
     assert.ok(JSON.stringify(parsed.content).includes("MCP_MARKER"));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP server registers dream-mode maintenance instructions for Mneme tools", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({
+    runtimeHomePath: root,
+    agentId: "luna",
+    mode: "dream"
+  });
+  const client = new Client({ name: "mneme-dream-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  try {
+    const tools = await client.listTools();
+    const dreamTools = tools.tools
+      .filter((tool) => tool.name.startsWith("memory_"))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    assert.deepEqual(
+      dreamTools.map((tool) => tool.name),
+      ["memory_forget", "memory_locate", "memory_register", "memory_search", "memory_summarize"]
+    );
+
+    const searchTool = dreamTools.find((tool) => tool.name === "memory_search");
+    assert.ok(searchTool);
+    const searchDescription = searchTool?.description ?? "";
+    assert.ok(searchDescription.includes("maintenance"));
+    assert.equal(searchDescription, getDreamMemoryToolInstructions()["memory.search"].description);
   } finally {
     await client.close();
     await server.close();

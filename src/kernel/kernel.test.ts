@@ -42,14 +42,15 @@ const seedText = async (
 
 const envelope = (principal: Principal) => ({
   version: "mneme.memory.tool.v1" as const,
+  mode: "awake" as const,
   wake_id: "wake-kernel",
   thread_id: "thread-kernel",
   principal,
   conversation_scope: "noopolis:agora",
   audience_key: "kernel",
   policy_version: "test-1",
-  allowed_scope_aliases: ["current", "global", "current_room", "current_pair", "current_task", "public_profile", "public_facts"] as Array<
-    "current" | "global" | "current_room" | "current_pair" | "current_task" | "public_profile" | "public_facts"
+  allowed_scope_aliases: ["all", "current", "global", "current_room", "current_pair", "current_task", "public_profile", "public_facts"] as Array<
+    "all" | "current" | "global" | "current_room" | "current_pair" | "current_task" | "public_profile" | "public_facts"
   >,
   transport: "in_process" as const,
   nonce: "nonce-1",

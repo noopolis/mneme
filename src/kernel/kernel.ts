@@ -1,7 +1,7 @@
 import { JsonlMemoryStore } from "../store/store.js";
-import { memoryPolicy } from "../policy/policy.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
-import { runRecall } from "../recall/recall.js";
+import type { MemoryEmbeddingProvider } from "../store/embedding.js";
+import { memoryPolicy } from "../policy/policy.js";
 import type {
   MemoryEventInput,
   MemoryKernel,
@@ -22,7 +22,6 @@ import {
   isSearchArguments,
   isSummarizeArguments,
   makeAudit,
-  matchesQuery,
   makeLocateResult,
   makeSearchResult,
   malformed,
@@ -32,21 +31,25 @@ import {
   locateCandidateId,
   sanitizePrincipal,
 } from "./support.js";
+import { prepareSearchCandidates } from "./search.js";
 
 export interface MemoryKernelConfig {
   runtimeHomePath: string;
   source?: string;
+  embeddingProvider?: MemoryEmbeddingProvider;
 }
 
 export class JsonlMemoryKernel implements MemoryKernel {
   private readonly store: JsonlMemoryStore;
   private readonly index;
   private readonly source: string;
+  private readonly embeddingProvider?: MemoryEmbeddingProvider;
 
   constructor(private readonly config: MemoryKernelConfig) {
     this.store = new JsonlMemoryStore(config.runtimeHomePath);
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
     this.source = this.config.source ?? `mneme/${this.config.runtimeHomePath}`;
+    this.embeddingProvider = config.embeddingProvider;
   }
 
   async search(call: MemoryToolCall): Promise<MemoryToolResult> {
@@ -63,37 +66,23 @@ export class JsonlMemoryKernel implements MemoryKernel {
     const requester = sanitizePrincipal(call.envelope.principal);
     const scope = resolveScope(args.scope, requester);
     const limit = asNumber(args.limit) || 20;
+    const queryText = args.query;
 
     try {
       const allEvents = await this.store.read();
       await this.index.rebuildFromEvents(allEvents);
-      const indexed = await this.index.query({
-        allowedScopes: scope === "all" ? undefined : [scope],
-        query: args.query,
-        limit: Math.max(limit * 4, 40)
+      const { candidates: ranked, queryEvents } = await prepareSearchCandidates({
+        scope,
+        queryText,
+        limit,
+        allEvents,
+        requester,
+        embeddingProvider: this.embeddingProvider,
+        index: this.index
       });
+      const events = queryEvents.map((entry) => entry.event);
 
-      const events = indexed.map((entry) => entry.event);
-      const tombstones = collectTombstones(allEvents);
-      const filteredEvents = events
-        .filter((event) => isRecallableMemoryEvent(event) && !tombstones.has(event.id))
-        .filter((event) => matchesQuery(event, args.query));
-
-      const selections = scope === "all"
-        ? filteredEvents.map((event) => ({
-          event,
-          decision: memoryPolicy({ request: requester, candidate: event, activeScope: requester }).decision
-        })).filter((entry) => entry.decision !== "deny")
-          .sort((left, right) => Date.parse(right.event.createdAt) - Date.parse(left.event.createdAt))
-        : runRecall({
-          actor: requester,
-          scopeIds: [scope],
-          events: filteredEvents,
-          query: args.query,
-          maxTokens: limit * 80
-        }).selected.map((entry) => ({ event: entry.event, decision: entry.decision }));
-
-      const selected = selections.slice(0, limit);
+      const selected = ranked.slice(0, limit);
       if (selected.length === 0) {
         return {
           request_id: call.request_id,

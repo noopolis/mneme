@@ -93,9 +93,9 @@ export const resolveScopePlan = (input: {
   const isMessage = input.wake.kind === "message" || input.wake.kind === "manual";
 
   const activePrincipal: MemoryPrincipalRef = (
-    (isMessage && fromPair.length > 0) ? fromPair[0]
-    : room ? room
+    room ? room
     : team ? team
+    : (isMessage && fromPair.length > 0) ? fromPair[0]
     : task ? task
     : role ? role
     : global

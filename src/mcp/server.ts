@@ -33,10 +33,10 @@ export const createMnemeMcpServer = (config: MnemeMcpServerConfig): McpServer =>
   const resolved = resolveMnemeMcpConfig(config);
   const server = new McpServer({
     name: "mneme",
-    version: "0.1.0"
+    version: "0.1.1"
   });
 
-  for (const descriptor of createMemoryToolDescriptors(resolved.runtime.kernel)) {
+  for (const descriptor of createMemoryToolDescriptors(resolved.runtime.kernel, { mode: resolved.mode })) {
     server.registerTool(
       descriptor.modelName,
       {

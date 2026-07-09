@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { readMemoryContext, resolveScopePlan } from "./scope.js";
 
-test("resolves message wake to sender pair scope when from is present", () => {
+test("resolves room message wake to room scope while keeping sender pair readable", () => {
   const plan = resolveScopePlan({
     agentId: "agent-a",
     context: {
@@ -22,9 +22,10 @@ test("resolves message wake to sender pair scope when from is present", () => {
 
   assert.deepStrictEqual(plan.activePrincipal, {
     agentId: "agent-a",
-    scope: "pair",
-    qualifier: "mapper"
+    scope: "room",
+    qualifier: "noopolis:agora"
   });
+  assert.ok(plan.readableScopes.some((scope) => scope.scope === "pair" && scope.qualifier === "mapper"));
   assert.ok(plan.readableScopes.some((scope) => scope.scope === "room" && scope.qualifier === "noopolis:agora"));
   assert.ok(plan.readableScopes.some((scope) => scope.scope === "team" && scope.qualifier === "team-a"));
 });

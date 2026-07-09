@@ -82,15 +82,16 @@ const toolCall = (
   request_id: `${tool}-deep-time`,
   tool,
   arguments: args,
-  envelope: {
-    version: "mneme.memory.tool.v1",
-    wake_id: "deep-time-wake",
+	  envelope: {
+	    version: "mneme.memory.tool.v1",
+	    mode: "awake",
+	    wake_id: "deep-time-wake",
     thread_id: "deep-time-thread",
     principal: requester,
     conversation_scope: requester.qualifier ?? requester.scope,
     audience_key: "deep-time",
     policy_version: "test",
-    allowed_scope_aliases: ["current", "global", "current_room", "current_pair", "current_task"],
+	    allowed_scope_aliases: ["all", "current", "global", "current_room", "current_pair", "current_task"],
     transport: "in_process",
     nonce: "deep-time",
     expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -249,8 +250,6 @@ test("private selflet memory is hinted across scopes and raw only inside its pai
     from: "athena-org-b",
     text: "What does the org-b selflet know about migration password?",
     context: {
-      networkId: "org-a",
-      roomId: "strategy",
       from: "athena-org-b",
       pairPeers: ["athena-org-b"]
     }

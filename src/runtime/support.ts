@@ -112,13 +112,15 @@ export const buildRecallInput = (input: {
   events: MemoryEvent[];
   text: string;
   maxTokens?: number;
+  embeddingScores?: Readonly<Record<string, number>> | ReadonlyMap<string, number>;
 }): ReturnType<typeof runRecall> => {
   return runRecall({
     actor: input.actor,
     scopeIds: input.scopeIds,
     events: input.events,
     query: input.text,
-    maxTokens: clampTokenBudget(input.maxTokens)
+    maxTokens: clampTokenBudget(input.maxTokens),
+    embeddingScores: input.embeddingScores
   });
 };
 

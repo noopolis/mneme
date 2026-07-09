@@ -4,20 +4,23 @@ export interface MemoryPrincipalRef {
   qualifier?: string;
 }
 
-export type MemoryWakeKind = "manual" | "message" | "schedule";
+export type MemoryWakeKind = "manual" | "message" | "schedule" | "dream";
+
+export type MemoryWakeMode = "awake" | "dream";
 
 export interface MemoryToolCallEnvelope {
   version: "mneme.memory.tool.v1";
+  mode: MemoryWakeMode;
   wake_id: string;
   thread_id: string;
   principal: MemoryPrincipalRef;
   conversation_scope: string;
   audience_key: string;
   policy_version: string;
-  allowed_scope_aliases: ReadonlyArray<
-    "current" | "global" | "public_profile" | "public_facts" |
-    "current_room" | "current_pair" | "current_task"
-  >;
+	  allowed_scope_aliases: ReadonlyArray<
+	    "all" | "current" | "global" | "public_profile" | "public_facts" |
+	    "current_room" | "current_pair" | "current_task"
+	  >;
   transport: "in_process" | "mcp" | "protocol" | "text_loop";
   nonce: string;
   expires_at: string;
@@ -42,6 +45,7 @@ export type MemoryModelToolName =
   | "memory_forget";
 
 export interface MemoryToolExecutionContext {
+  mode?: MemoryWakeMode;
   wakeId: string;
   threadId: string;
   principal: MemoryPrincipalRef;

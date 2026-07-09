@@ -7,6 +7,7 @@ import test from "node:test";
 import { createMemoryIndex, type MemoryIndexQuery } from "./sqliteIndex.js";
 import { makeChecksum, memoryScopeId } from "../identity/ids.js";
 import { JsonlMemoryStore } from "./store.js";
+import type { MemoryEmbeddingProvider } from "./embedding.js";
 import type { MemoryEvent, MemoryPrincipalRef, MemoryVisibility } from "../contract/types.js";
 
 const tempRoots: string[] = [];
@@ -63,6 +64,17 @@ const eventSeed = (input: {
   };
   event.checksum = makeChecksum({ ...event, checksum: "", createdAt });
   return event;
+};
+
+const embeddingProvider: MemoryEmbeddingProvider = {
+  dimensions: 2,
+  embed: async (text: string) => {
+    const normalized = text.toLowerCase();
+    if (normalized.includes("alpha-drive-marker")) {
+      return [1, 0];
+    }
+    return [0, 1];
+  }
 };
 
 test("rebuilds from in-memory events and returns filtered query results", async () => {
@@ -280,5 +292,86 @@ test("does not leak forbidden scopes even when query text matches", async () => 
 
   assert.equal(result.length, 1);
   assert.equal(result[0].event.id, "evt-allowed");
+  index.close();
+});
+
+test("retrieves semantically matching events with scope/tag/entity/type filters", async () => {
+  const runtimeHomePath = await tempDir();
+  const index = createMemoryIndex({ runtimeHomePath });
+
+  const expectedGlobal = principal("luna", "global");
+  const events = [
+    eventSeed({
+      id: "evt-match",
+      principal: expectedGlobal,
+      type: "memory.observed",
+      visibility: "global",
+      tags: ["semantic", "primary"],
+      entities: ["entity-alpha", "alpha"],
+      text: "alpha-drive-marker memory"
+    }),
+    eventSeed({
+      id: "evt-filtered-tag",
+      principal: expectedGlobal,
+      type: "memory.observed",
+      visibility: "global",
+      tags: ["other"],
+      entities: ["entity-alpha", "alpha"],
+      text: "alpha-drive-marker memory"
+    }),
+    eventSeed({
+      id: "evt-filtered-scope",
+      principal: principal("luna", "room", "noopolis:ops"),
+      type: "memory.observed",
+      visibility: "room",
+      tags: ["semantic", "primary"],
+      entities: ["entity-alpha", "alpha"],
+      text: "alpha-drive-marker memory"
+    }),
+    eventSeed({
+      id: "evt-filtered-type",
+      principal: expectedGlobal,
+      type: "memory.claimed",
+      visibility: "global",
+      tags: ["semantic", "primary"],
+      entities: ["entity-alpha", "alpha"],
+      text: "alpha-drive-marker memory"
+    }),
+    eventSeed({
+      id: "evt-nonmatch-vector",
+      principal: expectedGlobal,
+      type: "memory.observed",
+      visibility: "global",
+      tags: ["semantic", "primary"],
+      entities: ["entity-alpha", "alpha"],
+      text: "orthogonal-marker memory"
+    }),
+    eventSeed({
+      id: "evt-filtered-principal",
+      principal: principal("kira", "global"),
+      type: "memory.observed",
+      visibility: "global",
+      tags: ["semantic", "primary"],
+      entities: ["entity-alpha", "alpha"],
+      text: "alpha-drive-marker memory"
+    })
+  ];
+
+  await index.rebuildFromEvents(events);
+  const matches = await index.queryByEmbedding({
+    allowedScopes: [memoryScopeId(expectedGlobal)],
+    tags: ["semantic", "primary"],
+    entities: ["alpha"],
+    types: ["memory.observed"],
+    principalAgentId: "luna",
+    queryVector: [1, 0],
+    embeddingProvider,
+    limit: 5
+  });
+
+  assert.equal(matches.length, 2);
+  assert.equal(matches[0].event.id, "evt-match");
+  assert.equal(matches[0].score > matches[1].score, true);
+  assert.equal(matches.every((match) => match.event.principal.agentId === "luna"), true);
   index.close();
 });

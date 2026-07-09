@@ -1,5 +1,6 @@
 import { buildWakePacketText } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { createMemoryIndex } from "../store/sqliteIndex.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { readMemoryContext, resolveScopePlan } from "../identity/scope.js";
 import { createMemoryKernel } from "../kernel/kernel.js";
@@ -14,6 +15,7 @@ import {
   recallableEvents,
   selectToolSummary
 } from "./support.js";
+import type { MemoryEmbeddingProvider } from "../store/embedding.js";
 import type {
   MemoryEventInput,
   MemoryKernel,
@@ -39,21 +41,27 @@ export interface JsonlMemoryRuntimeConfig {
   runtimeHomePath: string;
   source?: string;
   tokenBudget?: number;
+  embeddingProvider?: MemoryEmbeddingProvider;
 }
 
 export class JsonlMemoryRuntime implements MemoryRuntime {
   private readonly store: JsonlMemoryStore;
+  private readonly index: ReturnType<typeof createMemoryIndex>;
   private readonly source: string;
   private readonly defaultTokenBudget: number;
+  private readonly embeddingProvider?: MemoryEmbeddingProvider;
   public readonly kernel: MemoryKernel;
 
   constructor(private readonly options: JsonlMemoryRuntimeConfig) {
     this.store = new JsonlMemoryStore(options.runtimeHomePath);
+    this.index = createMemoryIndex({ runtimeHomePath: options.runtimeHomePath });
+    this.embeddingProvider = options.embeddingProvider;
     this.source = options.source ?? defaultSource(options.agentId);
     this.defaultTokenBudget = clampTokenBudget(options.tokenBudget);
     this.kernel = createMemoryKernel({
       runtimeHomePath: options.runtimeHomePath,
-      source: this.source
+      source: this.source,
+      embeddingProvider: this.embeddingProvider
     });
   }
 
@@ -70,13 +78,38 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     });
 
     const scopeIds = normalizeScopeIds(scopePlan.readableScopes.map(memoryScopeId));
-    const events = recallableEvents(await readByScopes(this.store, scopeIds));
+    let events = recallableEvents(await readByScopes(this.store, scopeIds));
+    let embeddingScores: Map<string, number> | undefined;
+
+    if (this.embeddingProvider && request.text.trim().length > 0) {
+      try {
+        const allEvents = await this.store.read();
+        await this.index.rebuildFromEvents(allEvents);
+        const queryVector = await this.embeddingProvider.embed(request.text);
+        const indexed = await this.index.queryByEmbedding({
+          allowedScopes: scopeIds,
+          queryVector,
+          embeddingProvider: this.embeddingProvider,
+          limit: 80
+        });
+
+        const recallable = recallableEvents(indexed.map((entry) => entry.event));
+        if (recallable.length > 0) {
+          events = recallable;
+          embeddingScores = new Map(indexed.map((entry) => [entry.event.id, entry.score]));
+        }
+      } catch (_error) {
+        // Keep existing lexical recall behavior when embedding is unavailable.
+      }
+    }
+
     const recall = buildRecallInput({
       actor: scopePlan.activePrincipal,
       scopeIds,
       events,
       text: request.text,
-      maxTokens: request.tokenBudget ?? this.defaultTokenBudget
+      maxTokens: request.tokenBudget ?? this.defaultTokenBudget,
+      embeddingScores
     });
     const denied = deniedMemoryEvents({
       requester: scopePlan.activePrincipal,
