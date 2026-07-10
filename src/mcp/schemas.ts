@@ -35,7 +35,8 @@ export const registerInputSchema = {
   evidence_event_ids: z.array(z.string()).min(1).describe("Event ids that justify the memory."),
   source_type: z.string().describe("Source label for the registered memory."),
   confidence: z.number().optional().describe("Confidence from 0 to 1."),
-  principal: principalSchema.optional().describe("Optional principal override for the stored memory.")
+  principal: principalSchema.optional().describe("Optional principal override for the stored memory."),
+  memory_id: z.string().optional().describe("When set, register this as a new revision of an existing memory chain.")
 };
 
 export const summarizeInputSchema = {
@@ -49,10 +50,17 @@ export const forgetInputSchema = {
   reason: z.string().optional().describe("Why these memories should be forgotten.")
 };
 
+export const promoteInputSchema = {
+  scope: z.string().describe("Scope alias or canonical scope id the memory belongs to."),
+  memory_id: z.string().describe("The stable memory_id (root event id) of the chain to promote."),
+  reason: z.string().optional().describe("Why this memory is being promoted.")
+};
+
 export const schemaForModelToolName = (name: string) => {
   if (name === "memory_search") return searchInputSchema;
   if (name === "memory_locate") return locateInputSchema;
   if (name === "memory_register") return registerInputSchema;
   if (name === "memory_summarize") return summarizeInputSchema;
+  if (name === "memory_promote") return promoteInputSchema;
   return forgetInputSchema;
 };

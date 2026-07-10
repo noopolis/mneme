@@ -32,6 +32,8 @@ const principal = (
   qualifier
 });
 
+let eventSeedSeqCounter = 0;
+
 const eventSeed = (input: {
   id: string;
   principal: MemoryPrincipalRef;
@@ -44,6 +46,7 @@ const eventSeed = (input: {
 }): MemoryEvent => {
   const principalScope = principal(input.principal.agentId, input.principal.scope, input.principal.qualifier);
   const createdAt = input.createdAt ?? new Date().toISOString();
+  eventSeedSeqCounter += 1;
   const event = {
     id: input.id,
     type: input.type,
@@ -60,7 +63,8 @@ const eventSeed = (input: {
     entities: input.entities ?? [],
     sensitivity: "normal" as const,
     parentEventIds: [],
-    checksum: ""
+    checksum: "",
+    seq: eventSeedSeqCounter
   };
   event.checksum = makeChecksum({ ...event, checksum: "", createdAt });
   return event;

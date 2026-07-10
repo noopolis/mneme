@@ -16,3 +16,7 @@ This folder exposes Mneme through Model Context Protocol.
 - Use provider-safe tool names (`memory_search`, not `memory.search`).
 - Keep stdio output reserved for MCP transport messages. CLI diagnostics must go
   to stderr.
+- `memory_promote` (B59) is dream-only: `createMemoryToolDescriptors` only
+  includes it when `mode: "dream"`, and the capability defaulted onto the
+  envelope from that same mode is what the kernel actually enforces — this
+  folder does not gate it separately.

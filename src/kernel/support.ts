@@ -1,11 +1,15 @@
 import { canonicalScopeKey, memoryScopeId, sanitizePrincipalQualifier } from "../identity/ids.js";
+import { memoryStreamId, resolveCausalRunId } from "../contract/causal.js";
+import type { CausalEventStore } from "../store/causalStore.js";
 import type {
   MemoryDecision,
   MemoryEvent,
+  MemoryEventInput,
   MemoryEventType,
   MemoryContent,
   MemoryForgetArguments,
   MemoryLocateArguments,
+  MemoryPromoteArguments,
   MemoryRegisterArguments,
   MemorySearchArguments,
   MemorySummarizeArguments,
@@ -19,6 +23,7 @@ import type {
   MemoryVisibility,
   MemorySensitivity
 } from "../contract/types.js";
+import type { JsonlMemoryStore } from "../store/store.js";
 
 export interface CandidateHandle {
   decision: MemoryDecision;
@@ -126,7 +131,11 @@ export const isRegisterArguments = (value: unknown): value is MemoryRegisterArgu
   && isMemoryContent(value.content)
   && Array.isArray(value.evidence_event_ids)
   && value.evidence_event_ids.length > 0
-  && value.evidence_event_ids.every((id) => isString(id));
+  && value.evidence_event_ids.every((id) => isString(id))
+  && (value.memory_id === undefined || hasText(value.memory_id));
+
+export const isPromoteArguments = (value: unknown): value is MemoryPromoteArguments =>
+  isPlainObject(value) && hasText(value.scope) && hasText(value.memory_id);
 
 export const isForgetArguments = (value: unknown): value is MemoryForgetArguments => {
   if (!isPlainObject(value)) {
@@ -223,6 +232,68 @@ export const resolveScope = (scopeInput: string, requester: MemoryToolCallEnvelo
   }
 
   return canonicalScopeKey(scopeInput);
+};
+
+/**
+ * B62: emits the never-silent denial pair for a write-scope violation
+ * (see policy/writeScope.ts) — one `memory.denied` ledger line (tags
+ * `["denied","write"]`, mirroring the recall-side denial precedent above)
+ * plus one `memory.write.denied` causal event — then returns a `deny`
+ * result to the caller. Never throws. The stamped principal on both the
+ * ledger event and the causal event's `principal_id` is always the
+ * envelope's own (trusted) principal, never the claimed foreign scope's
+ * owner: the ledger event is written into the envelope principal's own
+ * scope, not the scope the call tried to reach.
+ */
+export const denyWriteScope = async (
+  store: JsonlMemoryStore,
+  causalStore: CausalEventStore,
+  call: MemoryToolCall,
+  tool: MemoryToolName,
+  scope: string,
+  reason: string,
+  startAt: number
+): Promise<MemoryToolResult> => {
+  const principal = sanitizePrincipal(call.envelope.principal);
+  const ownScope = resolveScope("current", principal);
+
+  await store.append({
+    type: "memory.denied",
+    principal,
+    scope: ownScope,
+    visibility: "private",
+    source: "mneme/policy",
+    content: {
+      kind: "text",
+      text: `Denied ${tool} write to scope ${scope}: ${reason}`
+    },
+    tags: ["denied", "write"],
+    entities: [principal.agentId, scope],
+    sensitivity: "normal",
+    parentEventIds: []
+  } satisfies MemoryEventInput);
+
+  await causalStore.append({
+    runId: resolveCausalRunId(),
+    streamId: memoryStreamId(principal.agentId),
+    type: "memory.write.denied",
+    principalId: `agent:${principal.agentId}`,
+    causeEventIds: [],
+    payload: {
+      tool,
+      requested_scope: scope,
+      reason
+    }
+  });
+
+  return {
+    request_id: call.request_id,
+    tool,
+    decision: "deny",
+    content: [],
+    audit: makeAudit(call, [], startAt),
+    error: reason
+  };
 };
 
 export const sanitizePrincipal = (principal: MemoryToolCallEnvelope["principal"]) => ({

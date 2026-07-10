@@ -1,3 +1,7 @@
+import type { MemoryOrigin } from "./lifecycleTypes.js";
+
+export * from "./lifecycleTypes.js";
+
 export interface MemoryPrincipalRef {
   agentId: string;
   scope: "global" | "team" | "room" | "pair" | "task" | "role" | "artifact";
@@ -33,7 +37,8 @@ export type MemoryToolName =
   | "memory.register"
   | "memory.write"
   | "memory.summarize"
-  | "memory.forget";
+  | "memory.forget"
+  | "memory.promote";
 
 export type MemoryExecutableToolName = Exclude<MemoryToolName, "memory.write">;
 
@@ -42,7 +47,8 @@ export type MemoryModelToolName =
   | "memory_locate"
   | "memory_register"
   | "memory_summarize"
-  | "memory_forget";
+  | "memory_forget"
+  | "memory_promote";
 
 export interface MemoryToolExecutionContext {
   mode?: MemoryWakeMode;
@@ -143,6 +149,8 @@ export interface MemoryRegisterArguments {
   source_type: string;
   confidence?: number;
   principal?: MemoryPrincipalRef;
+  /** When set, register this as a new revision of an existing memory chain. */
+  memory_id?: string;
 }
 
 export interface MemorySummarizeArguments {
@@ -162,6 +170,7 @@ export interface MemoryKernel {
   register(call: MemoryToolCall): Promise<MemoryToolResult>;
   summarize(call: MemoryToolCall): Promise<MemoryToolResult>;
   forget(call: MemoryToolCall): Promise<MemoryToolResult>;
+  promote(call: MemoryToolCall): Promise<MemoryToolResult>;
 }
 
 export interface MemoryToolDescriptor {
@@ -189,7 +198,9 @@ export type MemoryEventType =
   | "memory.recalled"
   | "memory.located"
   | "memory.denied"
-  | "memory.forgotten";
+  | "memory.forgotten"
+  | "memory.promoted"
+  | "memory.consolidated";
 
 export type MemoryContent =
   | { kind: "text"; text: string }
@@ -214,6 +225,14 @@ export interface MemoryEvent {
   ttl?: string;
   parentEventIds: string[];
   checksum: string;
+  /** Store-assigned monotonic sequence (bootstrapped from disk; legacy lines get a read-time 1-based line-order seq). */
+  seq: number;
+  /** Event id of the chain's first content event. Absent means this event is its own root. */
+  memoryId?: string;
+  /** Kernel-stamped from the validated capability, never from model input. */
+  origin?: MemoryOrigin;
+  /** memory.consolidated marker payload: the ledger seq snapshot at dream-pass start. */
+  highWaterSeq?: number;
 }
 
 export interface MemoryEventInput {
@@ -229,6 +248,9 @@ export interface MemoryEventInput {
   confidence?: number;
   ttl?: string;
   parentEventIds?: string[];
+  memoryId?: string;
+  origin?: MemoryOrigin;
+  highWaterSeq?: number;
 }
 
 export type MemoryDecision =

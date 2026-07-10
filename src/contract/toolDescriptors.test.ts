@@ -75,7 +75,16 @@ test("createMemoryToolDescriptors supports dream mode with maintenance-focused i
   assert.ok(MEMORY_TOOLS_DREAM_SAFE.includes("memory.search"));
   assert.equal(descriptors[0]?.description, getDreamMemoryToolInstructions()["memory.search"].description);
   assert.ok(descriptors[0]?.description.includes("maintenance"));
-  assert.deepEqual(MEMORY_TOOLS_DREAM_SAFE, MEMORY_TOOLS_AWAKE);
+});
+
+test("C3: AWAKE stays 5 tools, DREAM_SAFE becomes 6 — memory.promote is dream-only", () => {
+  assert.equal(MEMORY_TOOLS_AWAKE.length, 5);
+  assert.equal(MEMORY_TOOLS_DREAM_SAFE.length, 6);
+  assert.equal((MEMORY_TOOLS_AWAKE as readonly string[]).includes("memory.promote"), false);
+  assert.ok(MEMORY_TOOLS_DREAM_SAFE.includes("memory.promote"));
+  for (const tool of MEMORY_TOOLS_AWAKE) {
+    assert.ok((MEMORY_TOOLS_DREAM_SAFE as readonly string[]).includes(tool), `dream must be a superset covering ${tool}`);
+  }
 });
 
 test("tool descriptors can be narrowed by options", async () => {
@@ -115,7 +124,8 @@ test("tool envelopes preserve awake and dream modes", async () => {
     async locate() { return result; },
     async register() { return result; },
     async summarize() { return result; },
-    async forget() { return result; }
+    async forget() { return result; },
+    async promote() { return result; }
   };
   const [descriptor] = createMemoryToolDescriptors(kernel, { mode: "dream", toolNames: ["memory.search"] });
   assert.ok(descriptor);

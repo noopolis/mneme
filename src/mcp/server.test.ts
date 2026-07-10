@@ -68,6 +68,7 @@ test("MCP server lists and calls Mneme memory tools through the protocol", async
   try {
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name).sort();
+    // Awake mode (the default): 5 tools, memory_promote is dream-only (C3).
     assert.deepEqual(toolNames, [
       "memory_forget",
       "memory_locate",
@@ -109,9 +110,10 @@ test("MCP server registers dream-mode maintenance instructions for Mneme tools",
       .filter((tool) => tool.name.startsWith("memory_"))
       .sort((left, right) => left.name.localeCompare(right.name));
 
+    // Dream mode (C3): 6 tools — memory_promote is exposed only here.
     assert.deepEqual(
       dreamTools.map((tool) => tool.name),
-      ["memory_forget", "memory_locate", "memory_register", "memory_search", "memory_summarize"]
+      ["memory_forget", "memory_locate", "memory_promote", "memory_register", "memory_search", "memory_summarize"]
     );
 
     const searchTool = dreamTools.find((tool) => tool.name === "memory_search");
@@ -160,6 +162,47 @@ test("MCP register tool writes memories that search can read", async () => {
     });
     const parsedSearch = JSON.parse(firstTextContent(result));
     assert.ok(JSON.stringify(parsedSearch.content).includes("REGISTERED_BY_MCP"));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP dream-mode memory_promote tool promotes a registered memory end to end", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({
+    runtimeHomePath: root,
+    agentId: "keeper",
+    mode: "dream"
+  });
+  const client = new Client({ name: "mneme-promote-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  try {
+    const registered = await client.callTool({
+      name: "memory_register",
+      arguments: {
+        scope: "current",
+        kind: "text",
+        content: { kind: "text", text: "PROMOTE_CANDIDATE_MARKER belongs to keeper." },
+        visibility: "private",
+        sensitivity: "normal",
+        evidence_event_ids: ["evt_external"],
+        source_type: "mcp-test"
+      }
+    });
+    const parsedRegister = JSON.parse(firstTextContent(registered));
+    const memoryId = parsedRegister.content[0].event_ids[0];
+
+    const promoted = await client.callTool({
+      name: "memory_promote",
+      arguments: { scope: "current", memory_id: memoryId, reason: "reviewed in dream pass" }
+    });
+    const parsedPromote = JSON.parse(firstTextContent(promoted));
+    assert.equal(parsedPromote.decision, "allow_raw");
   } finally {
     await client.close();
     await server.close();

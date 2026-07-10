@@ -1,5 +1,6 @@
 import { JsonlMemoryStore } from "../store/store.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
+import { CausalEventStore } from "../store/causalStore.js";
 import type { MemoryEmbeddingProvider } from "../store/embedding.js";
 import { memoryPolicy } from "../policy/policy.js";
 import type {
@@ -15,39 +16,47 @@ import {
   hasInvalidV1Envelope,
   decide,
   eventText,
-  isForgetArguments,
   isLocateArguments,
-  isRegisterArguments,
   isRecallableMemoryEvent,
   isSearchArguments,
-  isSummarizeArguments,
   makeAudit,
   makeLocateResult,
   makeSearchResult,
   malformed,
   unavailable,
-  policyText,
   resolveScope,
   locateCandidateId,
   sanitizePrincipal,
 } from "./support.js";
 import { prepareSearchCandidates } from "./search.js";
+import { forgetMemory, promoteMemory, registerMemory, summarizeMemory } from "./mutations.js";
 
 export interface MemoryKernelConfig {
   runtimeHomePath: string;
   source?: string;
   embeddingProvider?: MemoryEmbeddingProvider;
+  /**
+   * B62: the causal store the four mutating tools append `memory.write.denied`
+   * events to. Callers that already own a CausalEventStore against this same
+   * runtimeHomePath (e.g. JsonlMemoryRuntime) MUST pass it here rather than
+   * letting the kernel mint its own — two independent CausalEventStore
+   * instances against the same causal.jsonl would each bootstrap their own
+   * in-memory per-stream seq counter and could stamp colliding seqs.
+   */
+  causalStore?: CausalEventStore;
 }
 
 export class JsonlMemoryKernel implements MemoryKernel {
   private readonly store: JsonlMemoryStore;
   private readonly index;
+  private readonly causalStore: CausalEventStore;
   private readonly source: string;
   private readonly embeddingProvider?: MemoryEmbeddingProvider;
 
   constructor(private readonly config: MemoryKernelConfig) {
     this.store = new JsonlMemoryStore(config.runtimeHomePath);
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
+    this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath);
     this.source = this.config.source ?? `mneme/${this.config.runtimeHomePath}`;
     this.embeddingProvider = config.embeddingProvider;
   }
@@ -200,172 +209,20 @@ export class JsonlMemoryKernel implements MemoryKernel {
     }
   }
 
-  async register(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.register", "unsupported envelope", startAt);
-    }
-    const args = call.arguments;
-    if (!isRegisterArguments(args)) {
-      return malformed(call, "memory.register", "memory.register requires evidence and content fields", startAt);
-    }
-
-    const principal = args.principal
-      ? sanitizePrincipal(args.principal)
-      : sanitizePrincipal(call.envelope.principal);
-    try {
-      const event = await this.store.append({
-        type: "memory.registered",
-        principal,
-        scope: resolveScope(args.scope, principal),
-        visibility: args.visibility,
-        source: args.source_type,
-        content: args.content,
-        tags: ["registered", principal.scope, args.visibility],
-        entities: [principal.agentId, principal.scope],
-        sensitivity: args.sensitivity,
-        parentEventIds: args.evidence_event_ids,
-        confidence: args.confidence
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.register",
-        decision: "allow_raw",
-        content: [{
-          kind: "memory",
-          text: "Registered memory with explicit evidence.",
-          event_ids: [event.id],
-          scope: event.scope,
-          principal: event.principal,
-          redactions: [],
-          confidence: args.confidence
-        }],
-        audit: makeAudit(call, [event], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.register", String(error instanceof Error ? error.message : error), startAt);
-    }
+  register(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return registerMemory(this.store, this.causalStore, call);
   }
 
-  async summarize(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.summarize", "unsupported envelope", startAt);
-    }
-
-    const args = call.arguments;
-    if (!isSummarizeArguments(args)) {
-      return malformed(call, "memory.summarize", "memory.summarize requires { scope }", startAt);
-    }
-
-    const requester = sanitizePrincipal(call.envelope.principal);
-    const scope = resolveScope(args.scope, requester);
-    const horizon = Math.min(asNumber(args.horizon) || 12, 40);
-
-    try {
-      const events = await this.store.read({ scope });
-      const tombstones = collectTombstones(events);
-      const sourceIds: string[] = [];
-
-      const lines = events
-        .filter((event) => isRecallableMemoryEvent(event) && !tombstones.has(event.id))
-        .map((event) => ({
-          event,
-          decision: memoryPolicy({ request: requester, candidate: event, activeScope: requester }).decision
-        }))
-        .filter((entry) => entry.decision !== "deny")
-        .slice(0, horizon)
-        .map((entry) => {
-          sourceIds.push(entry.event.id);
-          return `${entry.event.createdAt}: ${policyText(entry.decision, eventText(entry.event))}`;
-        });
-
-      if (sourceIds.length === 0) {
-        return { request_id: call.request_id, tool: "memory.summarize", decision: "deny", content: [], audit: makeAudit(call, [], startAt) };
-      }
-
-      const summary = await this.store.append({
-        type: "memory.summarized",
-        principal: requester,
-        scope,
-        visibility: "private",
-        source: this.source,
-        content: { kind: "text", text: lines.join("\n") },
-        tags: ["summary", ...sourceIds],
-        entities: [requester.agentId, requester.scope],
-        sensitivity: "normal",
-        confidence: 1,
-        parentEventIds: sourceIds
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.summarize",
-        decision: "allow_summary",
-        content: [{
-          kind: "narrative",
-          text: lines.join("\n"),
-          event_ids: sourceIds,
-          scope,
-          principal: requester,
-          redactions: [],
-          confidence: 1
-        }],
-        audit: makeAudit(call, [summary], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.summarize", String(error instanceof Error ? error.message : error), startAt);
-    }
+  summarize(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return summarizeMemory(this.store, this.causalStore, this.source, call);
   }
 
-  async forget(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.forget", "unsupported envelope", startAt);
-    }
-    const args = call.arguments;
-    if (!isForgetArguments(args)) {
-      return malformed(call, "memory.forget", "memory.forget requires { scope, event_ids }", startAt);
-    }
+  forget(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return forgetMemory(this.store, this.causalStore, this.source, call);
+  }
 
-    const requester = sanitizePrincipal(call.envelope.principal);
-    try {
-      const event = await this.store.append({
-        type: "memory.forgotten",
-        principal: requester,
-        scope: resolveScope(args.scope, requester),
-        visibility: "private",
-        source: this.source,
-        content: {
-          kind: "text",
-          text: `Tombstone for ${args.event_ids.length} event(s).`
-        },
-        tags: ["forget", "tombstone"],
-        entities: [requester.agentId, requester.scope],
-        sensitivity: "secret",
-        confidence: 1,
-        parentEventIds: args.event_ids
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.forget",
-        decision: "allow_raw",
-        content: [{
-          kind: "memory",
-          text: `Tombstone written for ${args.event_ids.length} event(s).`,
-          event_ids: [event.id],
-          scope: event.scope,
-          principal: event.principal,
-          redactions: ["content-redacted"],
-          confidence: 1
-        }],
-        audit: makeAudit(call, [event], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.forget", String(error instanceof Error ? error.message : error), startAt);
-    }
+  promote(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return promoteMemory(this.store, this.causalStore, this.source, call);
   }
 }
 

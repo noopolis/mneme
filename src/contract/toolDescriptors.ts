@@ -41,13 +41,18 @@ export const MEMORY_TOOLS_AWAKE = [
   "memory.forget"
 ] as const satisfies ReadonlyArray<MemoryExecutableToolName>;
 
+/** Dream mode gets everything awake gets, plus memory.promote (dream-only; see src/policy/capability.ts). */
 export const MEMORY_TOOLS_DREAM_SAFE = [
   "memory.search",
   "memory.locate",
   "memory.register",
   "memory.summarize",
-  "memory.forget"
+  "memory.forget",
+  "memory.promote"
 ] as const satisfies ReadonlyArray<MemoryExecutableToolName>;
+
+type AwakeToolName = (typeof MEMORY_TOOLS_AWAKE)[number];
+type DreamToolName = (typeof MEMORY_TOOLS_DREAM_SAFE)[number];
 
 export const AWAKE_MEMORY_SKILL_TEXT = [
   "# Mneme Memory",
@@ -68,7 +73,7 @@ export const DREAM_MEMORY_SKILL_TEXT = [
 ].join("\n");
 
 export const AWAKE_MEMORY_TOOL_INSTRUCTIONS: Record<
-  MemoryExecutableToolName,
+  AwakeToolName,
   MemoryModeAwareInstructions
 > = {
   "memory.search": {
@@ -111,7 +116,7 @@ export const AWAKE_MEMORY_TOOL_INSTRUCTIONS: Record<
 };
 
 export const DREAM_MEMORY_TOOL_INSTRUCTIONS: Record<
-  MemoryExecutableToolName,
+  DreamToolName,
   MemoryModeAwareInstructions
 > = {
   "memory.search": {
@@ -153,6 +158,14 @@ export const DREAM_MEMORY_TOOL_INSTRUCTIONS: Record<
       "Use memory_forget for controlled housekeeping and policy-driven cleanup.",
       "Provide explicit event ids and a clear reason."
     ]
+  },
+  "memory.promote": {
+    description: "Promote the current head revision of a memory as durable and maintenance-reviewed.",
+    promptSnippet: "Promote a memory's head revision after consolidation review.",
+    promptGuidelines: [
+      "Use memory_promote only on the current head revision of a memory you have reviewed this pass.",
+      "Promotion is dream-only; it never runs while awake and never marks the scope dirty."
+    ]
   }
 };
 
@@ -161,7 +174,8 @@ const MEMORY_TOOL_MODELS: Record<MemoryExecutableToolName, MemoryModelToolName> 
   "memory.locate": "memory_locate",
   "memory.register": "memory_register",
   "memory.summarize": "memory_summarize",
-  "memory.forget": "memory_forget"
+  "memory.forget": "memory_forget",
+  "memory.promote": "memory_promote"
 };
 
 const MEMORY_TOOL_LABELS: Record<MemoryExecutableToolName, string> = {
@@ -169,21 +183,28 @@ const MEMORY_TOOL_LABELS: Record<MemoryExecutableToolName, string> = {
   "memory.locate": "Memory Locate",
   "memory.register": "Memory Register",
   "memory.summarize": "Memory Summarize",
-  "memory.forget": "Memory Forget"
+  "memory.forget": "Memory Forget",
+  "memory.promote": "Memory Promote"
 };
 
+// AWAKE and DREAM instruction maps are keyed on each mode's own tool name
+// union (5 vs 6 members, since memory.promote is dream-only). toOrderedToolSpecs
+// only ever produces spec.name values drawn from that same mode's own tool
+// list, so the cast below is safe at the point of use.
 const getInstructionTextForMode = (mode: MemoryWakeMode): Record<
   MemoryExecutableToolName,
   MemoryModeAwareInstructions
-> => (mode === "dream" ? DREAM_MEMORY_TOOL_INSTRUCTIONS : AWAKE_MEMORY_TOOL_INSTRUCTIONS);
+> => (mode === "dream"
+  ? DREAM_MEMORY_TOOL_INSTRUCTIONS as Record<MemoryExecutableToolName, MemoryModeAwareInstructions>
+  : AWAKE_MEMORY_TOOL_INSTRUCTIONS as Record<MemoryExecutableToolName, MemoryModeAwareInstructions>);
 
 export const getAwakeMemoryToolInstructions = (): Record<
-  MemoryExecutableToolName,
+  AwakeToolName,
   MemoryModeAwareInstructions
 > => AWAKE_MEMORY_TOOL_INSTRUCTIONS;
 
 export const getDreamMemoryToolInstructions = (): Record<
-  MemoryExecutableToolName,
+  DreamToolName,
   MemoryModeAwareInstructions
 > => DREAM_MEMORY_TOOL_INSTRUCTIONS;
 
@@ -233,23 +254,34 @@ export const createMemoryToolDescriptors = (
   }));
 };
 
+// Mirrors the literal capability tokens owned by src/policy/capability.ts
+// (AWAKE_CAPABILITY / DREAM_CAPABILITY). Not imported directly to keep
+// contract/ from depending on policy/ — the two sides are tied together by
+// the B59 acceptance suite (see policy/capability.test.ts and this file's
+// tests) rather than a shared runtime import.
+const capabilityForMode = (mode: MemoryWakeMode): string =>
+  mode === "dream" ? "mneme.cap.dream.v1" : "mneme.cap.awake.v1";
+
 export const createMemoryToolEnvelope = (
   context: MemoryToolExecutionContext
-): MemoryToolCallEnvelope => ({
-  version: "mneme.memory.tool.v1",
-  mode: context.mode ?? "awake",
-  wake_id: context.wakeId,
-  thread_id: context.threadId,
-  principal: context.principal,
-  conversation_scope: context.conversationScope,
-  audience_key: context.audienceKey ?? context.principal.agentId,
-  policy_version: context.policyVersion ?? "memory-policy.v1",
-  allowed_scope_aliases: context.allowedScopeAliases ?? defaultScopeAliases,
-  transport: context.transport ?? "in_process",
-  nonce: context.nonce ?? `${context.wakeId}:${Date.now()}`,
-  expires_at: context.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
-  capability: context.capability ?? "memory"
-});
+): MemoryToolCallEnvelope => {
+  const mode = context.mode ?? "awake";
+  return {
+    version: "mneme.memory.tool.v1",
+    mode,
+    wake_id: context.wakeId,
+    thread_id: context.threadId,
+    principal: context.principal,
+    conversation_scope: context.conversationScope,
+    audience_key: context.audienceKey ?? context.principal.agentId,
+    policy_version: context.policyVersion ?? "memory-policy.v1",
+    allowed_scope_aliases: context.allowedScopeAliases ?? defaultScopeAliases,
+    transport: context.transport ?? "in_process",
+    nonce: context.nonce ?? `${context.wakeId}:${Date.now()}`,
+    expires_at: context.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
+    capability: context.capability ?? capabilityForMode(mode)
+  };
+};
 
 const createMemoryToolCall = (
   tool: MemoryExecutableToolName,
@@ -271,5 +303,6 @@ const executeMemoryTool = (
   if (tool === "memory.locate") return kernel.locate(call);
   if (tool === "memory.register") return kernel.register(call);
   if (tool === "memory.summarize") return kernel.summarize(call);
+  if (tool === "memory.promote") return kernel.promote(call);
   return kernel.forget(call);
 };

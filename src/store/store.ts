@@ -31,14 +31,74 @@ export interface MemoryStore {
 export class JsonlMemoryStore implements MemoryStore {
   private readonly eventsPath: string;
   private readonly dirPath: string;
+  private seqCounter = 0;
+  private seqInitialized = false;
 
   constructor(runtimeHomePath: string) {
     this.dirPath = path.join(runtimeHomePath, "memory");
     this.eventsPath = path.join(this.dirPath, "events.jsonl");
   }
 
+  /**
+   * Bootstraps the monotonic seq counter from whatever is already on disk,
+   * the same way CausalEventStore bootstraps its per-stream seq (see
+   * src/store/causalStore.ts). Legacy lines written before B59 have no
+   * `seq` field; each such line is treated as having the seq equal to its
+   * 1-based position among non-blank lines, so new appends continue
+   * monotonically past both legacy and B59-native lines.
+   */
+  private async ensureSeqInitialized(): Promise<void> {
+    if (this.seqInitialized) {
+      return;
+    }
+    this.seqInitialized = true;
+
+    let payload = "";
+    try {
+      payload = await readFile(this.eventsPath, "utf8");
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    let lineIndex = 0;
+    let maxSeq = 0;
+    for (const line of payload.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      lineIndex += 1;
+
+      try {
+        const parsed = JSON.parse(trimmed) as Partial<MemoryEvent>;
+        const seq = typeof parsed.seq === "number" && Number.isFinite(parsed.seq) ? parsed.seq : lineIndex;
+        if (seq > maxSeq) {
+          maxSeq = seq;
+        }
+      } catch {
+        // Bootstrapping the in-memory seq counter only; malformed lines are
+        // skipped defensively rather than validated here.
+        if (lineIndex > maxSeq) {
+          maxSeq = lineIndex;
+        }
+      }
+    }
+
+    this.seqCounter = maxSeq;
+  }
+
+  private async nextSeq(): Promise<number> {
+    await this.ensureSeqInitialized();
+    this.seqCounter += 1;
+    return this.seqCounter;
+  }
+
   private async appendOne(input: MemoryEventInput): Promise<MemoryEvent> {
     const createdAt = new Date().toISOString();
+    const seq = await this.nextSeq();
     const event: MemoryEvent = {
       id: makeEventId(),
       type: input.type,
@@ -53,6 +113,10 @@ export class JsonlMemoryStore implements MemoryStore {
       sensitivity: input.sensitivity ?? "normal",
       ttl: input.ttl,
       parentEventIds: input.parentEventIds ?? [],
+      seq,
+      memoryId: input.memoryId,
+      origin: input.origin,
+      highWaterSeq: input.highWaterSeq,
       checksum: makeChecksum({
         ...input,
         id: "__temporary__",
@@ -84,6 +148,8 @@ export class JsonlMemoryStore implements MemoryStore {
 
   async clear(): Promise<void> {
     await appendFile(this.eventsPath, "", { encoding: "utf8", flag: "w" }).catch(() => Promise.resolve());
+    this.seqInitialized = false;
+    this.seqCounter = 0;
   }
 
   async read(query: MemoryStoreQuery = {}): Promise<MemoryEvent[]> {
@@ -107,17 +173,25 @@ export class JsonlMemoryStore implements MemoryStore {
     const wantedTags = (query.tags ?? []).map((tag) => tag.toLowerCase());
     const wantedTypes = query.types;
 
+    let lineIndex = 0;
     for (const line of payload.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) {
         continue;
       }
+      lineIndex += 1;
 
       let event: MemoryEvent;
       try {
         event = JSON.parse(trimmed) as MemoryEvent;
       } catch {
         continue;
+      }
+
+      // Legacy (pre-B59) lines have no `seq`; backfill from 1-based line
+      // order so downstream lifecycle projections always see a numeric seq.
+      if (typeof event.seq !== "number" || !Number.isFinite(event.seq)) {
+        event = { ...event, seq: lineIndex };
       }
 
       if (query.scope && event.scope !== canonicalScopeKey(query.scope)) {

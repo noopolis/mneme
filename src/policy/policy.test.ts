@@ -33,7 +33,8 @@ const event = (input: {
   entities: [],
   sensitivity: "normal",
   parentEventIds: [],
-  checksum: "checksum"
+  checksum: "checksum",
+  seq: 1
 });
 
 test("team and room memories require stored scope to match their source principal", () => {

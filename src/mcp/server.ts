@@ -18,6 +18,9 @@ const annotationsFor = (name: string): ToolAnnotations => {
   if (name === "memory_forget") {
     return { destructiveHint: true, openWorldHint: false };
   }
+  if (name === "memory_promote") {
+    return { destructiveHint: false, openWorldHint: false };
+  }
   return { openWorldHint: false };
 };
 
