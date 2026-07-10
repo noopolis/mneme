@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createMemoryRuntime } from "./runtime.js";
+import { createDeepTimeSession } from "./deep-time.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { memoryScopeId } from "../identity/ids.js";
 import type { MemoryPrincipalRef, MemoryVisibility, MemoryEventInput, MemoryToolCall } from "../contract/types.js";
@@ -357,4 +358,87 @@ test("locate records provenance audit without disclosing content", async () => {
   assert.equal(audit.content.kind, "text");
   assert.ok(audit.content.text.includes("Located"));
   assert.equal(audit.content.text.includes("ROOM_SUMMARY_MARKER"), false);
+});
+
+// B3/B4 — createDeepTimeSession's transactional high-water-mark rule -------
+
+test("B3: awake writes dirty a scope; committing a consolidation pass clears it; a mid-pass awake write stays dirty", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "first awake fact"
+  });
+
+  const dirtyBefore = await session.selectDirtyScopes();
+  const scopeEntry = dirtyBefore.find((entry) => entry.scope === memoryScopeId(principal("luna", "global")));
+  assert.ok(scopeEntry, "scope with an awake write must be dirty");
+  assert.equal(scopeEntry?.newContentCount, 1);
+
+  const scope = memoryScopeId(principal("luna", "global"));
+  const consolidation = await session.beginConsolidation(scope);
+  assert.ok(consolidation.highWaterSeq > 0);
+
+  // Mid-pass: a new awake write lands with a seq past the snapshot.
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "second awake fact written during the pass"
+  });
+
+  await consolidation.commit(["evt_consolidation_output"]);
+
+  const dirtyAfter = await session.selectDirtyScopes();
+  const scopeAfter = dirtyAfter.find((entry) => entry.scope === scope);
+  assert.ok(scopeAfter, "the mid-pass write must keep the scope dirty even after commit");
+  assert.equal(scopeAfter?.newContentCount, 1);
+  assert.equal(scopeAfter?.lastConsolidatedSeq, consolidation.highWaterSeq);
+});
+
+test("B3: a scope with no writes after the marker is clean", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+  const scope = memoryScopeId(principal("luna", "global"));
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "only awake fact"
+  });
+
+  const consolidation = await session.beginConsolidation(scope);
+  await consolidation.commit([]);
+
+  const dirtyAfter = await session.selectDirtyScopes();
+  assert.equal(dirtyAfter.some((entry) => entry.scope === scope), false);
+});
+
+test("B4: crash-sim — if commit() never runs, the scope stays dirty and a rerun is safe (no duplicate marker)", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+  const scope = memoryScopeId(principal("luna", "global"));
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "fact before the simulated crash"
+  });
+
+  // Simulate a crash: beginConsolidation ran, but commit() never did.
+  await session.beginConsolidation(scope);
+
+  const dirtyAfterCrash = await session.selectDirtyScopes();
+  assert.ok(dirtyAfterCrash.some((entry) => entry.scope === scope), "no marker was written, so the scope must still be dirty");
+
+  // Rerun: begin again and this time commit — must be idempotent-safe.
+  const rerun = await session.beginConsolidation(scope);
+  await rerun.commit(["evt_rerun_output"]);
+
+  const dirtyAfterRerun = await session.selectDirtyScopes();
+  assert.equal(dirtyAfterRerun.some((entry) => entry.scope === scope), false);
+
+  const markers = (await store.read({ scope, types: ["memory.consolidated"] }));
+  assert.equal(markers.length, 1, "the crashed pass must not have left a stray marker");
 });
