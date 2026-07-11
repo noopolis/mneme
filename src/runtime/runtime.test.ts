@@ -434,6 +434,17 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
 
     assert.equal(recalledEvents.length, turn.recall.selectedEventIds.length);
 
+    // B0 memory->turn causal join fix: prepareTurn must surface the exact
+    // mneme:<uuid> event_id of each memory.recalled event it appended, in
+    // the same order as recall.selected, so daimon's stampTurnInputSubmitted
+    // can chain cause_event_ids to ids that actually resolve in mneme's own
+    // causal.jsonl rather than the raw evt_<...> recall ids.
+    assert.equal(turn.recalledCausalEventIds.length, recalledEvents.length);
+    assert.deepEqual(new Set(turn.recalledCausalEventIds), new Set(recalledEvents.map((event) => event.event_id)));
+    for (const causalEventId of turn.recalledCausalEventIds) {
+      assert.equal(causalEventId.startsWith("mneme:"), true);
+    }
+
     for (const event of recalledEvents) {
       assert.equal(validateMemoryRecalledCausalEvent(event), true);
       assert.deepEqual(event.cause_event_ids, ["evt-wake-causal"]);
@@ -646,6 +657,7 @@ test("B70: off mode never reads memory, stamps zero memory.recalled, and gates k
     assert.deepEqual(turn.recall.selectedEventIds, []);
     assert.equal(turn.recall.totalCandidates, 0);
     assert.ok(!turn.promptText.includes("canary payload"));
+    assert.deepEqual(turn.recalledCausalEventIds, []);
 
     const causalEvents = await new CausalEventStore(root).read();
     assert.equal(causalEvents.filter((event) => event.type === "memory.recalled").length, 0);
@@ -746,6 +758,7 @@ test("B70: shuffled mode injects the other-scope decoy, never the on-mode select
     assert.equal(recalled.length, 1);
     assert.equal(recalled[0].payload.memory_id, decoyEvent.id);
     assert.notEqual(recalled[0].payload.memory_id, canaryEvent.id);
+    assert.deepEqual(turn.recalledCausalEventIds, [recalled[0].event_id]);
 
     const modeStamps = causalEvents.filter((event) => event.type === "memory.recall.mode");
     assert.equal(modeStamps.length, 1);

@@ -167,8 +167,15 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     // "shuffled" mode it stamps the decoys actually injected, never the
     // excluded on-mode selection.
     const causalRunId = resolveCausalRunId();
+    // Collected in `recall.selected` order so callers that need to chain
+    // `cause_event_ids` to these specific memory.recalled events (e.g.
+    // @noopolis/daimon's stampTurnInputSubmitted) can zip them against
+    // `recall.selectedEventIds` positionally, though the ids themselves are
+    // the only thing that matters for reconciliation (see
+    // MemoryPrepareTurnResult.recalledCausalEventIds doc comment).
+    const recalledCausalEventIds: string[] = [];
     for (const entry of recall.selected) {
-      await appendMemoryRecalledEvent(this.causalStore, {
+      const recalledEvent = await appendMemoryRecalledEvent(this.causalStore, {
         runId: causalRunId,
         agentId: this.options.agentId,
         principalId: `agent:${this.options.agentId}`,
@@ -181,6 +188,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
         scope: entry.event.scope,
         contentSha256: entry.event.checksum
       });
+      recalledCausalEventIds.push(recalledEvent.event_id);
     }
 
     // Mode stamp (ledger proof), appended in every mode so an evidence
@@ -242,7 +250,8 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
       principal: scopePlan.activePrincipal,
       packet: recall.packet,
       promptText,
-      recall: recall.audit
+      recall: recall.audit,
+      recalledCausalEventIds
     };
   }
 

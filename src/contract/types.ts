@@ -327,6 +327,20 @@ export interface MemoryPrepareTurnResult {
   packet: MemoryPacket;
   promptText: string;
   recall: MemoryRecallAudit;
+  /**
+   * The `event_id` (`mneme:<uuid>`, see contract/causal.ts
+   * `mnemeCausalEventId`) of each `memory.recalled` causal event this
+   * `prepareTurn` call actually appended to `causal.jsonl` — one per entry
+   * in `recall.selectedEventIds`, same order. `recall.selectedEventIds`
+   * are the raw kernel-log recall ids (`evt_<...>`), a different id
+   * namespace than the causal event stream every authority (moltnet,
+   * daimon, mneme) stamps its own events under; callers that chain
+   * `cause_event_ids` across authorities (see `@noopolis/daimon`
+   * `stampTurnInputSubmitted`) must reference the ids here, not
+   * `recall.selectedEventIds`, or the reconciler can never resolve the
+   * cause link back to mneme's own `memory.recalled` events.
+   */
+  recalledCausalEventIds: string[];
 }
 
 export interface MemoryTurnRecord {

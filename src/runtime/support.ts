@@ -166,7 +166,7 @@ const toDecisionText = (decision: MemoryDecision): string => {
 const memoryTagsFromRequest = (
   request: MemoryRecallRequest,
   packet: MemoryPacket,
-  result: MemoryPrepareTurnResult
+  result: Pick<MemoryPrepareTurnResult, "principal">
 ): string[] => {
   const context = request.context ?? {};
   const tokens = [
@@ -233,12 +233,7 @@ export const buildDecisionEvents = (input: {
     ...extractTokens(input.packet.principal.scope)
   ];
 
-  const tags = memoryTagsFromRequest(input.request, input.packet, {
-    principal: input.principal,
-    packet: input.packet,
-    promptText: input.outputText,
-    recall: input.recall
-  });
+  const tags = memoryTagsFromRequest(input.request, input.packet, { principal: input.principal });
 
   const base = baseEventInput({
     principal: input.principal,
