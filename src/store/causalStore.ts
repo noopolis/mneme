@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   CAUSAL_EVENT_VERSION,
   MEMORY_RECALLED_EVENT_TYPE,
+  MEMORY_WRITTEN_EVENT_TYPE,
   MNEME_CAUSAL_SYSTEM,
   memoryStreamId,
   mnemeCausalEventId
@@ -12,7 +13,9 @@ import {
 import type {
   CausalEvent,
   MemoryRecalledCausalEvent,
-  MemoryRecalledPayload
+  MemoryRecalledPayload,
+  MemoryWrittenCausalEvent,
+  MemoryWrittenPayload
 } from "../contract/causal.js";
 
 export interface CausalAppendInput<TPayload = Record<string, unknown>> {
@@ -176,3 +179,39 @@ export const appendMemoryRecalledEvent = (
       content_sha256: input.contentSha256
     }
   }) as Promise<MemoryRecalledCausalEvent>;
+
+export interface MemoryWrittenAppendInput {
+  runId: string;
+  agentId: string;
+  principalId: string;
+  causeEventIds: string[];
+  memoryId: string;
+  revisionId: string;
+  scope: string;
+  contentSha256: string;
+}
+
+/**
+ * Appends one `memory.written` causal event for a single durably-registered
+ * memory. Callers (`kernel/mutations.ts` `registerMemory`) emit one of these
+ * per successful `memory.register` call, with
+ * `stream_id="memory:<agentId>"` — the same stream `memory.recalled` uses —
+ * so writes and recalls for one agent share a single ordered causal stream.
+ */
+export const appendMemoryWrittenEvent = (
+  store: CausalEventStore,
+  input: MemoryWrittenAppendInput
+): Promise<MemoryWrittenCausalEvent> =>
+  store.append<MemoryWrittenPayload>({
+    runId: input.runId,
+    streamId: memoryStreamId(input.agentId),
+    type: MEMORY_WRITTEN_EVENT_TYPE,
+    principalId: input.principalId,
+    causeEventIds: input.causeEventIds,
+    payload: {
+      memory_id: input.memoryId,
+      revision_id: input.revisionId,
+      scope: input.scope,
+      content_sha256: input.contentSha256
+    }
+  }) as Promise<MemoryWrittenCausalEvent>;

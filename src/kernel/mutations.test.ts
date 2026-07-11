@@ -9,6 +9,7 @@ import { CausalEventStore } from "../store/causalStore.js";
 import { createMemoryKernel } from "./kernel.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { SYSTEM_CAPABILITY } from "../policy/capability.js";
+import { validateMemoryWrittenCausalEvent } from "../contract/causal.js";
 import type { MemoryToolCall, MemoryToolCallEnvelope, MemoryPrincipalRef } from "../contract/types.js";
 
 const tempRoots: string[] = [];
@@ -147,6 +148,115 @@ test("register against a forgotten chain is rejected", async () => {
   }));
 
   assert.equal(rejected.decision, "malformed_request");
+});
+
+// Write-side causal event: `memory.written` (see src/contract/causal.ts
+// MemoryWrittenPayload doc comment). Mirrors `memory.recalled` — one event
+// per successful `memory.register` call, chained via `cause_event_ids` to
+// the envelope's `wake_id` (the writing turn), so a memory write is
+// reconcilable from causal.jsonl the same way a recall already is.
+
+test("memory.register stamps a schema-valid memory.written event chained to the writing turn for a new memory", async () => {
+  const root = await tempDir();
+  const causalStore = new CausalEventStore(root);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
+  const scope = memoryScopeId(principal);
+
+  const result = await kernel.register(call("reg-written-1", "memory.register", principal, {
+    scope,
+    kind: "text",
+    content: { kind: "text", text: "first write" },
+    visibility: "global",
+    sensitivity: "normal",
+    evidence_event_ids: ["evt_external"],
+    source_type: "test"
+  }, { wake_id: "wake-writes-turn-1" }));
+
+  const eventId = result.content[0].event_ids[0];
+
+  const causalEvents = await causalStore.read();
+  const written = causalEvents.filter((event) => event.type === "memory.written");
+  assert.equal(written.length, 1);
+  assert.ok(validateMemoryWrittenCausalEvent(written[0]));
+
+  assert.equal(written[0].principal_id, "agent:agent-a");
+  assert.equal(written[0].emitter.stream_id, "memory:agent-a");
+  assert.deepEqual(written[0].cause_event_ids, ["wake-writes-turn-1"]);
+  // A brand-new memory is its own chain root: memory_id === the register's
+  // own event id, same convention runtime.ts uses for memory.recalled
+  // (`entry.event.memoryId ?? entry.event.id`).
+  assert.equal(written[0].payload.memory_id, eventId);
+  assert.equal(written[0].payload.revision_id, eventId);
+  assert.equal(written[0].payload.scope, scope);
+  assert.ok((written[0].payload.content_sha256 as string).length > 0);
+});
+
+test("memory.register stamps memory.written with the chain root as memory_id for a revision, distinct from revision_id", async () => {
+  const root = await tempDir();
+  const causalStore = new CausalEventStore(root);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
+  const scope = memoryScopeId(principal);
+
+  const first = await kernel.register(call("reg-written-root", "memory.register", principal, {
+    scope,
+    kind: "text",
+    content: { kind: "text", text: "revision one" },
+    visibility: "global",
+    sensitivity: "normal",
+    evidence_event_ids: ["evt_external"],
+    source_type: "test"
+  }));
+  const rootId = first.content[0].event_ids[0];
+
+  const second = await kernel.register(call("reg-written-revision", "memory.register", principal, {
+    scope,
+    kind: "text",
+    content: { kind: "text", text: "revision two" },
+    visibility: "global",
+    sensitivity: "normal",
+    evidence_event_ids: ["evt_external_2"],
+    source_type: "test",
+    memory_id: rootId
+  }));
+  const revisionId = second.content[0].event_ids[0];
+
+  const causalEvents = await causalStore.read();
+  const written = causalEvents.filter((event) => event.type === "memory.written");
+  // Exactly one memory.written per register call: two calls, two stamps.
+  assert.equal(written.length, 2);
+
+  const revisionWritten = written.find((event) => event.payload.revision_id === revisionId);
+  assert.ok(revisionWritten);
+  assert.ok(validateMemoryWrittenCausalEvent(revisionWritten));
+  assert.equal(revisionWritten!.payload.memory_id, rootId);
+  assert.notEqual(revisionWritten!.payload.memory_id, revisionWritten!.payload.revision_id);
+});
+
+test("memory.register denied by the write-scope guard stamps memory.write.denied but never memory.written", async () => {
+  const root = await tempDir();
+  const causalStore = new CausalEventStore(root);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
+  const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
+  const foreignScope = memoryScopeId(bob);
+
+  const result = await kernel.register(call("reg-written-denied", "memory.register", alice, {
+    scope: foreignScope,
+    kind: "text",
+    content: { kind: "text", text: "cross-scope write attempt" },
+    visibility: "global",
+    sensitivity: "normal",
+    evidence_event_ids: ["evt_external"],
+    source_type: "test"
+  }));
+
+  assert.equal(result.decision, "deny");
+
+  const causalEvents = await causalStore.read();
+  assert.equal(causalEvents.filter((event) => event.type === "memory.written").length, 0);
+  assert.equal(causalEvents.filter((event) => event.type === "memory.write.denied").length, 1);
 });
 
 test("C1: awake capability is refused for memory.promote", async () => {

@@ -50,6 +50,29 @@ export interface MemoryRecalledPayload {
 
 export type MemoryRecalledCausalEvent = CausalEvent<MemoryRecalledPayload>;
 
+export const MEMORY_WRITTEN_EVENT_TYPE = "memory.written" as const;
+
+/**
+ * Payload for `memory.written`, the write-side counterpart to
+ * `memory.recalled` (see `MemoryRecalledPayload` doc comment above). Stamped
+ * once per successful `memory.register` tool call (see
+ * `kernel/mutations.ts` `registerMemory`) so a durable memory write is
+ * reconcilable from the causal ledger the same way a recall already is,
+ * instead of only from mneme's own `events.jsonl`. `memory_id` is the
+ * chain root (own id for a new memory, the existing chain's root id for a
+ * new revision); `revision_id` is this specific write's own event id;
+ * `content_sha256` mirrors `memory.recalled`'s `content_sha256` field
+ * exactly (both are the ledger event's `checksum`).
+ */
+export interface MemoryWrittenPayload {
+  memory_id: string;
+  revision_id: string;
+  scope: string;
+  content_sha256: string;
+}
+
+export type MemoryWrittenCausalEvent = CausalEvent<MemoryWrittenPayload>;
+
 const causalEventEmitterSchema = z
   .object({
     system: z.enum(CAUSAL_EVENT_SYSTEMS),
@@ -98,6 +121,15 @@ export const memoryRecalledPayloadSchema = z
   })
   .strict();
 
+export const memoryWrittenPayloadSchema = z
+  .object({
+    memory_id: z.string().min(1),
+    revision_id: z.string().min(1),
+    scope: z.string().min(1),
+    content_sha256: z.string().min(1)
+  })
+  .strict();
+
 export const validateCausalEvent = (value: unknown) => causalEventSchema.safeParse(value);
 
 export const parseCausalEvent = (value: unknown): CausalEvent => {
@@ -131,6 +163,26 @@ export const validateMemoryRecalledCausalEvent = (
   }
 
   return memoryRecalledPayloadSchema.safeParse(envelope.data.payload).success;
+};
+
+/**
+ * Validates a fully-formed `memory.written` causal event: the envelope
+ * shape plus the `memory.written` payload minimum. Mirrors
+ * `validateMemoryRecalledCausalEvent` above.
+ */
+export const validateMemoryWrittenCausalEvent = (
+  value: unknown
+): value is MemoryWrittenCausalEvent => {
+  const envelope = validateCausalEvent(value);
+  if (!envelope.success) {
+    return false;
+  }
+
+  if (envelope.data.type !== MEMORY_WRITTEN_EVENT_TYPE) {
+    return false;
+  }
+
+  return memoryWrittenPayloadSchema.safeParse(envelope.data.payload).success;
 };
 
 export const NOOPOLIS_RUN_ID_ENV = "NOOPOLIS_RUN_ID";

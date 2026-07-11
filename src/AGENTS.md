@@ -35,7 +35,11 @@ package.
   active against a given `runtimeHomePath` at a time (its seq counter is
   in-memory), so `JsonlMemoryRuntime` constructs one and passes it into
   `createMemoryKernel({ causalStore })` rather than letting the kernel mint
-  a second one.
+  a second one. `appendMemoryWrittenEvent` is the write-side counterpart to
+  `appendMemoryRecalledEvent`: one `memory.written` causal event per
+  successful `memory.register` call (see `kernel/mutations.ts`), so a
+  durable memory write is reconcilable from `causal.jsonl` the same way a
+  recall already is, instead of only from `events.jsonl`.
 - `kernel/` executes `memory.*` tools against the store, index, and policy.
   `mutations.ts` holds the four capability-gated mutating tools
   (register/summarize/forget/promote), split out of `kernel.ts` to stay
@@ -46,6 +50,14 @@ package.
   written into the envelope principal's own scope, not the claimed foreign
   scope) plus one `memory.write.denied` causal event (`principal_id` always
   the envelope principal), then returns a `deny` result. Never throws.
+  `registerMemory` also stamps one `memory.written` causal event per
+  successful write (never on a denied/malformed/unavailable outcome),
+  `cause_event_ids` chained to `call.envelope.wake_id` (the writing turn) —
+  the write-side counterpart to `runtime.ts`'s `memory.recalled` stamp.
+  This causal stamp is independent of the B70 recall-mode ablation: the
+  kernel never sees `recallMode` at all, and `guardKernelForRecallMode`
+  leaves all four mutating tools live in every mode, so a write is always
+  reconcilable from the causal ledger regardless of recall mode.
 - `runtime/` prepares wake-time memory packets and records turn output.
   `deep-time.ts` is the B59 dream-mode consolidation session (dirty-scope
   selection + the transactional high-water-mark commit). `recallMode.ts` is

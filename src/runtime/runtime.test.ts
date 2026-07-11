@@ -8,7 +8,7 @@ import { createMemoryRuntime } from "./runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
-import { validateMemoryRecalledCausalEvent } from "../contract/causal.js";
+import { validateMemoryRecalledCausalEvent, validateMemoryWrittenCausalEvent } from "../contract/causal.js";
 import type { MemoryEmbeddingProvider } from "../store/embedding.js";
 import type { MemoryPrincipalRef, MemoryToolCall } from "../contract/types.js";
 
@@ -814,6 +814,44 @@ test("B70: shuffled mode is degenerate and injects nothing when there is no comp
   assert.equal(modeStamps[0].payload.degenerate, true);
   assert.equal(modeStamps[0].payload.injected_count, 0);
 });
+
+for (const recallMode of ["on", "off", "shuffled"] as const) {
+  test(`memory.written is stamped for a register write regardless of recall mode (${recallMode})`, async () => {
+    const root = await tempDir();
+    const runtime = createMemoryRuntime({
+      agentId: "agent-a",
+      runtimeHomePath: root,
+      recallMode
+    });
+    const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
+
+    const registerCall: MemoryToolCall = {
+      ...memoryToolCall(principal, {
+        scope: memoryScopeId(principal),
+        kind: "text",
+        content: { kind: "text", text: `write under recall mode ${recallMode}` },
+        visibility: "global",
+        sensitivity: "normal",
+        evidence_event_ids: ["evt_external"],
+        source_type: "test"
+      }),
+      tool: "memory.register"
+    };
+
+    const result = await runtime.kernel.register(registerCall);
+    assert.equal(result.decision, "allow_raw");
+
+    // guardKernelForRecallMode (see runtime/recallMode.ts) only wraps
+    // memory.search/memory.locate; the four mutating tools, including
+    // register, stay live and stamp memory.written in every mode — the
+    // ablation is recall-only, never write-side.
+    const causalEvents = await new CausalEventStore(root).read();
+    const written = causalEvents.filter((event) => event.type === "memory.written");
+    assert.equal(written.length, 1);
+    assert.ok(validateMemoryWrittenCausalEvent(written[0]));
+    assert.equal(written[0].cause_event_ids[0], "runtime-test-wake");
+  });
+}
 
 test("B70: resolveRecallMode integration — invalid config throws at construction, default stays on", () => {
   assert.throws(() => createMemoryRuntime({

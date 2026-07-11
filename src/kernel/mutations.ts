@@ -1,6 +1,8 @@
 import { projectLifecycle } from "../store/lifecycle.js";
 import type { JsonlMemoryStore } from "../store/store.js";
+import { appendMemoryWrittenEvent } from "../store/causalStore.js";
 import type { CausalEventStore } from "../store/causalStore.js";
+import { resolveCausalRunId } from "../contract/causal.js";
 import { memoryPolicy } from "../policy/policy.js";
 import { assertToolCapability } from "../policy/capability.js";
 import { assertWriteScope } from "../policy/writeScope.js";
@@ -107,6 +109,29 @@ export const registerMemory = async (
       memoryId: args.memory_id,
       origin: capabilityCheck.origin
     } satisfies MemoryEventInput);
+
+    // Write-side counterpart to `memory.recalled` (see
+    // src/contract/causal.ts `MemoryWrittenPayload` doc comment): one
+    // `memory.written` causal event per successful register, so a memory
+    // write is reconcilable from causal.jsonl the same way a recall already
+    // is. `cause_event_ids` chains to `call.envelope.wake_id`, the same
+    // turn/wake context `runtime.ts` `prepareTurn` chains `memory.recalled`
+    // to via `request.eventId` — the only turn-identifying id available on
+    // this tool-call path. Stamped once per register call regardless of
+    // recall mode: this kernel path never sees `recallMode` (see
+    // `runtime/recallMode.ts` `guardKernelForRecallMode`, which leaves all
+    // four mutating tools live in every mode), so a write is never gated by
+    // the recall ablation.
+    await appendMemoryWrittenEvent(causalStore, {
+      runId: resolveCausalRunId(),
+      agentId: principal.agentId,
+      principalId: `agent:${principal.agentId}`,
+      causeEventIds: [call.envelope.wake_id],
+      memoryId: event.memoryId ?? event.id,
+      revisionId: event.id,
+      scope: event.scope,
+      contentSha256: event.checksum
+    });
 
     return {
       request_id: call.request_id,
