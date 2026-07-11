@@ -2,8 +2,9 @@
 const printUsage = (): void => {
   process.stderr.write(`Usage:
   mneme mcp --runtime-home <path> --agent-id <id> [options]
+  mneme export --runtime-home <path> --agent-id <id> [--exported-at <iso>]
 
-Options:
+Options (mcp):
   --agent-scope <scope>          Principal scope. Default: global
   --agent-qualifier <value>      Principal qualifier for room/team/pair/task scopes
   --mode <awake|dream>           MCP wake mode. Default: awake
@@ -17,6 +18,12 @@ Options:
   --embedding-base-url <url>      Embedding provider base URL
   --embedding-dimensions <n>      Expected embedding vector dimensions
   --embedding-timeout-ms <ms>     Embedding request timeout
+
+Options (export):
+  --exported-at <iso>            ISO 8601 timestamp stamped on the export. Default: now
+
+  Writes the bank's memories (mneme.memory-export.v1) to
+  <runtime-home>/memory/export.json.
 
 Environment:
   MNEME_RUNTIME_HOME
@@ -43,6 +50,14 @@ const main = async (): Promise<void> => {
     printUsage();
     return;
   }
+
+  if (command === "export") {
+    const { runMnemeExportCommand } = await import("./export.js");
+    const writtenPath = await runMnemeExportCommand(args);
+    process.stdout.write(`${writtenPath}\n`);
+    return;
+  }
+
   if (command !== "mcp") {
     printUsage();
     process.exitCode = 2;

@@ -8,7 +8,14 @@ package.
 - `contract/` defines runtime-neutral types and provider-neutral memory tool
   descriptors. `lifecycleTypes.ts` holds the B59 lifecycle/capability types
   (split out of `types.ts` to stay under 400 lines; re-exported from
-  `types.ts`).
+  `types.ts`). `memoryExport.ts` owns `mneme.memory-export.v1` (Slice B
+  Piece 5 min-slice, per `.local/plan/contracts.md`'s "Mneme memory export"
+  registry row): a `.strict()` zod schema for `{version, bank_id,
+  exported_at, memories: [{memory_id, revision_id, scope, content,
+  content_sha256}]}`, mirroring `causal.ts`'s
+  schema-plus-`validate*`/`parse*` style. No embeddings, revision history,
+  or provenance (Phase H full export); no credential-shaped fields, per
+  contracts.md's "No credentials in exchanged artifacts" rule.
 - `identity/` defines principal, scope, and canonical id helpers.
 - `policy/` decides access/redaction for candidate memories. `capability.ts`
   is the B59 capability guard (awake vs dream tokens, origin stamping); it
@@ -58,6 +65,22 @@ package.
   kernel never sees `recallMode` at all, and `guardKernelForRecallMode`
   leaves all four mutating tools live in every mode, so a write is always
   reconcilable from the causal ledger regardless of recall mode.
+  `memoryExport.ts`'s `exportMemories(bank, exportedAt)` is the
+  `mneme.memory-export.v1` producer: it reads a bank's whole
+  `JsonlMemoryStore` (a bank spans every scope one agent's runtime
+  participates in), replays it through `lifecycle.ts`'s `projectLifecycle`,
+  and emits one entry per memory chain at its LATEST revision (`content`
+  and `content_sha256` read off that revision's own event —
+  `content_sha256` is that event's `checksum`, the same value
+  `kernel/mutations.ts` and `runtime.ts` stamp into `memory.written`/
+  `memory.recalled` causal events). Forgotten chains are omitted. Ordering
+  is deterministic by each chain's root-event `seq` (creation order), never
+  wall-clock or Map-iteration order. `exportedAt` is always caller-supplied
+  (never `Date.now()` internally) so the function stays deterministic;
+  `writeMemoryExport`/`exportMemoriesToFile` write/validate
+  `memory/export.json` beside `events.jsonl`/`causal.jsonl` — the file a
+  future `spawnfile artifacts export` egresses for `simfile observe` to
+  consume instead of reading `events.jsonl` directly.
 - `runtime/` prepares wake-time memory packets and records turn output.
   `deep-time.ts` is the B59 dream-mode consolidation session (dirty-scope
   selection + the transactional high-water-mark commit). `recallMode.ts` is
@@ -72,7 +95,11 @@ package.
   mutating tools live. `runtime.ts`'s `prepareTurn` stamps a
   `memory.recall.mode` causal event every wake, in every mode.
 - `mcp/` exposes the same tool contract through Model Context Protocol.
-- `cli/` provides the local `mneme` entrypoint.
+- `cli/` provides the local `mneme` entrypoint. `export.ts` is the thin
+  `mneme export --runtime-home <path> --agent-id <id> [--exported-at
+  <iso>]` command: it only parses argv/env and calls
+  `store/memoryExport.ts`'s `exportMemoriesToFile`, per this repo's CLI
+  philosophy (business logic stays in store/kernel modules).
 - `index.ts` is the public Mneme barrel used by Daimon and future extraction.
 
 ## Rules
