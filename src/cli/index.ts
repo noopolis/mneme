@@ -2,7 +2,8 @@
 const printUsage = (): void => {
   process.stderr.write(`Usage:
   mneme mcp --runtime-home <path> --agent-id <id> [options]
-  mneme export --runtime-home <path> --agent-id <id> [--exported-at <iso>]
+  mneme seal --runtime-home <path> --agent-id <id> [--run-id <id>]
+  mneme export --runtime-home <path> --agent-id <id> [--run-id <id>]
 
 Options (mcp):
   --agent-scope <scope>          Principal scope. Default: global
@@ -10,6 +11,7 @@ Options (mcp):
   --mode <awake|dream>           MCP wake mode. Default: awake
   --conversation-scope <scope>   Conversation scope id. Default: principal scope id
   --audience-key <key>           Audience key. Default: agent id
+  --allowed-scopes <ids>         Comma-separated finite scope ids. Default: current,global
   --policy-version <version>     Policy version. Default: memory-policy.v1
   --source <label>               Source label for generated memory events
   --token-budget <number>        Default recall token budget
@@ -19,19 +21,23 @@ Options (mcp):
   --embedding-dimensions <n>      Expected embedding vector dimensions
   --embedding-timeout-ms <ms>     Embedding request timeout
 
-Options (export):
-  --exported-at <iso>            ISO 8601 timestamp stamped on the export. Default: now
+Options (seal/export):
+  --run-id <id>                  Causal run id. Required unless NOOPOLIS_RUN_ID is set
 
-  Writes the bank's memories (mneme.memory-export.v1) to
-  <runtime-home>/memory/export.json.
+  seal writes the Mneme-owned final and exports the exact scoped stream.
+  export only re-exports an already-finalized scoped stream. Both write
+  mneme.causal-evidence-export.v1 bytes to
+  <runtime-home>/memory/causal-evidence.jsonl. Raw memory export is retired.
 
 Environment:
   MNEME_RUNTIME_HOME
   MNEME_AGENT_ID
+  NOOPOLIS_RUN_ID
   MNEME_AGENT_SCOPE
   MNEME_AGENT_QUALIFIER
   MNEME_CONVERSATION_SCOPE
   MNEME_AUDIENCE_KEY
+  MNEME_ALLOWED_SCOPES
   MNEME_POLICY_VERSION
   MNEME_MODE
   MNEME_SOURCE
@@ -51,9 +57,11 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  if (command === "export") {
-    const { runMnemeExportCommand } = await import("./export.js");
-    const writtenPath = await runMnemeExportCommand(args);
+  if (command === "export" || command === "seal") {
+    const { runMnemeExportCommand, runMnemeSealCommand } = await import("./export.js");
+    const writtenPath = command === "seal"
+      ? await runMnemeSealCommand(args)
+      : await runMnemeExportCommand(args);
     process.stdout.write(`${writtenPath}\n`);
     return;
   }

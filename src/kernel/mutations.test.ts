@@ -3,16 +3,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createHash } from "node:crypto";
 
 import { JsonlMemoryStore } from "../store/store.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { createMemoryKernel } from "./kernel.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { SYSTEM_CAPABILITY } from "../policy/capability.js";
+import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import { validateMemoryWrittenCausalEvent } from "../contract/causal.js";
 import type { MemoryToolCall, MemoryToolCallEnvelope, MemoryPrincipalRef } from "../contract/types.js";
 
 const tempRoots: string[] = [];
+const authorityFor = (bankId: string) => ({ secret: "mutations-test-authority", bankId, runtimeId: "mutations-test-runtime" });
+const TEST_AUTHORITY = authorityFor("agent-a");
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-mutations-"));
   tempRoots.push(directory);
@@ -29,7 +33,7 @@ const envelope = (
 ): MemoryToolCallEnvelope => ({
   version: "mneme.memory.tool.v1",
   mode: "awake",
-  wake_id: "wake-mutations",
+  wake_id: "daimon:wake-mutations",
   thread_id: "thread-mutations",
   principal,
   conversation_scope: "noopolis:agora",
@@ -49,17 +53,16 @@ const call = (
   principal: MemoryPrincipalRef,
   args: Record<string, unknown>,
   envelopeOverrides: Partial<MemoryToolCallEnvelope> = {}
-): MemoryToolCall => ({
-  request_id: requestId,
-  tool,
-  arguments: args,
-  envelope: envelope(principal, envelopeOverrides)
-});
+): MemoryToolCall => {
+  const unsigned = envelopeOverrides.nonce ? envelope(principal, envelopeOverrides) : { ...envelope(principal, envelopeOverrides), nonce: `nonce:${requestId}` };
+  const handoff = createMemoryAuthorityHandoff(authorityFor(principal.agentId));
+  return { request_id: requestId, tool, arguments: args, envelope: { ...unsigned, authority: handoff.issue({ request_id: requestId, tool, arguments: args, envelope: unsigned }) } };
+};
 
 test("register with memory_id creates a new revision and injects the current head into parentEventIds", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -95,7 +98,7 @@ test("register with memory_id creates a new revision and injects the current hea
 
 test("register with an unknown memory_id is rejected as malformed", async () => {
   const root = await tempDir();
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -107,15 +110,16 @@ test("register with an unknown memory_id is rejected as malformed", async () => 
     sensitivity: "normal",
     evidence_event_ids: ["evt_external"],
     source_type: "test",
-    memory_id: "evt_does_not_exist"
+    memory_id: "RAW_SECRET_MEMORY_ID"
   }));
 
   assert.equal(result.decision, "malformed_request");
+  assert.equal(JSON.stringify(result).includes("RAW_SECRET_MEMORY_ID"), false);
 });
 
 test("register against a forgotten chain is rejected", async () => {
   const root = await tempDir();
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -159,7 +163,7 @@ test("register against a forgotten chain is rejected", async () => {
 test("memory.register stamps a schema-valid memory.written event chained to the writing turn for a new memory", async () => {
   const root = await tempDir();
   const causalStore = new CausalEventStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -171,7 +175,7 @@ test("memory.register stamps a schema-valid memory.written event chained to the 
     sensitivity: "normal",
     evidence_event_ids: ["evt_external"],
     source_type: "test"
-  }, { wake_id: "wake-writes-turn-1" }));
+  }, { wake_id: "daimon:wake-writes-turn-1" }));
 
   const eventId = result.content[0].event_ids[0];
 
@@ -182,7 +186,7 @@ test("memory.register stamps a schema-valid memory.written event chained to the 
 
   assert.equal(written[0].principal_id, "agent:agent-a");
   assert.equal(written[0].emitter.stream_id, "memory:agent-a");
-  assert.deepEqual(written[0].cause_event_ids, ["wake-writes-turn-1"]);
+  assert.deepEqual(written[0].cause_event_ids, ["daimon:wake-writes-turn-1"]);
   // A brand-new memory is its own chain root: memory_id === the register's
   // own event id, same convention runtime.ts uses for memory.recalled
   // (`entry.event.memoryId ?? entry.event.id`).
@@ -195,7 +199,7 @@ test("memory.register stamps a schema-valid memory.written event chained to the 
 test("memory.register stamps memory.written with the chain root as memory_id for a revision, distinct from revision_id", async () => {
   const root = await tempDir();
   const causalStore = new CausalEventStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -237,7 +241,7 @@ test("memory.register stamps memory.written with the chain root as memory_id for
 test("memory.register denied by the write-scope guard stamps memory.write.denied but never memory.written", async () => {
   const root = await tempDir();
   const causalStore = new CausalEventStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
   const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
   const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
   const foreignScope = memoryScopeId(bob);
@@ -261,7 +265,7 @@ test("memory.register denied by the write-scope guard stamps memory.write.denied
 
 test("C1: awake capability is refused for memory.promote", async () => {
   const root = await tempDir();
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -287,7 +291,7 @@ test("C1: awake capability is refused for memory.promote", async () => {
 test("C1: dream capability promotes the head and stamps origin dream", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -317,7 +321,7 @@ test("C1: dream capability promotes the head and stamps origin dream", async () 
 
 test("C2: dream mode with an awake capability token is malformed for a mutating tool", async () => {
   const root = await tempDir();
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
@@ -373,7 +377,7 @@ for (const tool of ["memory.register", "memory.summarize", "memory.forget", "mem
     const root = await tempDir();
     const store = new JsonlMemoryStore(root);
     const causalStore = new CausalEventStore(root);
-    const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+    const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
 
     const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
     const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
@@ -410,6 +414,7 @@ for (const tool of ["memory.register", "memory.summarize", "memory.forget", "mem
     assert.equal(deniedLedgerEvents.length, 1);
     assert.deepEqual(deniedLedgerEvents[0].tags.sort(), ["denied", "write"]);
     assert.equal(deniedLedgerEvents[0].principal.agentId, "alice");
+    assert.equal(JSON.stringify(deniedLedgerEvents[0]).includes(foreignScope), false);
 
     // Exactly one memory.write.denied causal event, principal_id = agent:alice.
     const causalEvents = await causalStore.read();
@@ -419,14 +424,16 @@ for (const tool of ["memory.register", "memory.summarize", "memory.forget", "mem
     assert.notEqual(writeDenials[0].principal_id, "agent:bob");
     assert.equal(writeDenials[0].emitter.stream_id, "memory:alice");
     assert.equal(writeDenials[0].payload.tool, tool);
-    assert.equal(writeDenials[0].payload.requested_scope, foreignScope);
+    assert.equal(writeDenials[0].payload.requested_scope_sha256, createHash("sha256").update(foreignScope).digest("hex"));
+    assert.equal(writeDenials[0].payload.reason_code, "scope-not-authorized");
+    assert.equal(JSON.stringify(writeDenials[0]).includes(foreignScope), false);
   });
 }
 
 test("B62: mneme.cap.system.v1 explicitly authorizes a cross-scope register write", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
 
   const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
   const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
@@ -453,10 +460,10 @@ test("B62: mneme.cap.system.v1 explicitly authorizes a cross-scope register writ
   assert.equal(foreignEvents.length, 1);
 });
 
-test("B62: assertWriteScope denial for register does not depend on the args-supplied principal override", async () => {
+test("B45: a model-supplied register principal override is malformed", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
 
   const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
   const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
@@ -483,21 +490,38 @@ test("B62: assertWriteScope denial for register does not depend on the args-supp
     }
   ));
 
-  assert.equal(result.decision, "deny");
+  assert.equal(result.decision, "malformed_request");
   const foreignEvents = await store.read({ scope: foreignScope, types: ["memory.registered"] });
   assert.equal(foreignEvents.length, 0);
 });
 
+test("B45 forget rejects more than 256 targets before any domain mutation", async () => {
+  const root = await tempDir();
+  const store = new JsonlMemoryStore(root);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
+  const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
+  const result = await kernel.forget(call("forget-too-many", "memory.forget", principal, {
+    scope: memoryScopeId(principal),
+    event_ids: Array.from({ length: 257 }, (_, index) => `evt_${index}`),
+    reason: "bounded hostile test"
+  }));
+
+  assert.equal(result.decision, "malformed_request");
+  assert.deepEqual(await store.read(), []);
+  assert.equal((await new CausalEventStore(root).read()).filter((event) => event.type === "memory.tool.outcome").length, 1);
+});
+
 test("promote against an unknown memory_id is malformed", async () => {
   const root = await tempDir();
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
   const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 
   const result = await kernel.promote(call("promote-unknown", "memory.promote", principal, {
     scope,
-    memory_id: "evt_does_not_exist"
+    memory_id: "RAW_SECRET_PROMOTE_ID"
   }, { mode: "dream", capability: "mneme.cap.dream.v1" }));
 
   assert.equal(result.decision, "malformed_request");
+  assert.equal(JSON.stringify(result).includes("RAW_SECRET_PROMOTE_ID"), false);
 });

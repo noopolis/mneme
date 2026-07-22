@@ -1,21 +1,16 @@
-# Daimon Memory Module
+# Mneme Source Guide
 
-This folder is the incubation boundary for the future standalone Noopolis memory
-package.
+This folder is the standalone Noopolis memory package implementation.
 
 ## Structure
 
 - `contract/` defines runtime-neutral types and provider-neutral memory tool
   descriptors. `lifecycleTypes.ts` holds the B59 lifecycle/capability types
   (split out of `types.ts` to stay under 400 lines; re-exported from
-  `types.ts`). `memoryExport.ts` owns `mneme.memory-export.v1` (Slice B
-  Piece 5 min-slice, per `.local/plan/contracts.md`'s "Mneme memory export"
-  registry row): a `.strict()` zod schema for `{version, bank_id,
-  exported_at, memories: [{memory_id, revision_id, scope, content,
-  content_sha256}]}`, mirroring `causal.ts`'s
-  schema-plus-`validate*`/`parse*` style. No embeddings, revision history,
-  or provenance (Phase H full export); no credential-shaped fields, per
-  contracts.md's "No credentials in exchanged artifacts" rule.
+  `types.ts`). `memoryExport.ts` owns the B45 replacement for the retired
+  `mneme.memory-export.v1`: `mneme.causal-evidence-export.v1` exports only a
+  finalized, explicitly selected causal stream. It never reads a memory bank
+  or emits `MemoryContent`.
 - `identity/` defines principal, scope, and canonical id helpers.
 - `policy/` decides access/redaction for candidate memories. `capability.ts`
   is the B59 capability guard (awake vs dream tokens, origin stamping); it
@@ -27,7 +22,7 @@ package.
   allowedScopeAliases, resolvedScope, capability)` denies a mutating write
   whose resolved literal scope is not derivable from the trusted envelope
   principal/`allowed_scope_aliases` (own canonical scope, own `global`
-  variant, or the `all` literal, each gated on the matching envelope alias)
+  variant, or a trusted-system-only literal scope)
   unless the caller holds `mneme.cap.system.v1`. `principal` and
   `allowedScopeAliases` must always come from `call.envelope`, never from
   tool arguments or model output — mirrors capability.ts's origin
@@ -38,15 +33,20 @@ package.
   states, dirty-scope selection) — a pure, rebuildable read model over the
   ledger, never a second source of truth. `causalStore.ts`'s
   `CausalEventStore` is a per-`(run_id, stream_id)` append-only writer for
-  `noopolis.causal-event.v1` records; only one instance should ever be
-  active against a given `runtimeHomePath` at a time (its seq counter is
-  in-memory), so `JsonlMemoryRuntime` constructs one and passes it into
-  `createMemoryKernel({ causalStore })` rather than letting the kernel mint
-  a second one. `appendMemoryWrittenEvent` is the write-side counterpart to
+  `noopolis.causal-event.v1` records. Instances in one Node process share
+  sequencing; each read/export operation validates and consumes one durable
+  byte snapshot, never a validate-then-reread pair. Keep one writer process
+  per runtime home. `JsonlMemoryRuntime` passes its store into
+  `createMemoryKernel({ causalStore })`. `appendMemoryWrittenEvent` is the write-side counterpart to
   `appendMemoryRecalledEvent`: one `memory.written` causal event per
   successful `memory.register` call (see `kernel/mutations.ts`), so a
   durable memory write is reconcilable from `causal.jsonl` the same way a
   recall already is, instead of only from `events.jsonl`.
+  `mnemeEvidence.ts` revalidates each Mneme event family, stream owner,
+  principal, decision/authority/cause shape, secret-free payload, and ordered
+  local-parent closure. Local Mneme parents must already exist in the same
+  run and owner stream, and an event cannot cite itself. Summary, forget, and
+  promote emit separate content-free write/lifecycle facts.
 - `kernel/` executes `memory.*` tools against the store, index, and policy.
   `mutations.ts` holds the four capability-gated mutating tools
   (register/summarize/forget/promote), split out of `kernel.ts` to stay
@@ -65,22 +65,9 @@ package.
   kernel never sees `recallMode` at all, and `guardKernelForRecallMode`
   leaves all four mutating tools live in every mode, so a write is always
   reconcilable from the causal ledger regardless of recall mode.
-  `memoryExport.ts`'s `exportMemories(bank, exportedAt)` is the
-  `mneme.memory-export.v1` producer: it reads a bank's whole
-  `JsonlMemoryStore` (a bank spans every scope one agent's runtime
-  participates in), replays it through `lifecycle.ts`'s `projectLifecycle`,
-  and emits one entry per memory chain at its LATEST revision (`content`
-  and `content_sha256` read off that revision's own event —
-  `content_sha256` is that event's `checksum`, the same value
-  `kernel/mutations.ts` and `runtime.ts` stamp into `memory.written`/
-  `memory.recalled` causal events). Forgotten chains are omitted. Ordering
-  is deterministic by each chain's root-event `seq` (creation order), never
-  wall-clock or Map-iteration order. `exportedAt` is always caller-supplied
-  (never `Date.now()` internally) so the function stays deterministic;
-  `writeMemoryExport`/`exportMemoriesToFile` write/validate
-  `memory/export.json` beside `events.jsonl`/`causal.jsonl` — the file a
-  future `spawnfile artifacts export` egresses for `simfile observe` to
-  consume instead of reading `events.jsonl` directly.
+  `memoryExport.ts` seals or exports one selected `CausalEventStore` stream.
+  It writes secret-free canonical bytes
+  to `memory/causal-evidence.jsonl`; raw bank-wide memory export is retired.
 - `runtime/` prepares wake-time memory packets and records turn output.
   `deep-time.ts` is the B59 dream-mode consolidation session (dirty-scope
   selection + the transactional high-water-mark commit). `recallMode.ts` is
@@ -93,13 +80,18 @@ package.
   `guardKernelForRecallMode` wraps `memory.search`/`memory.locate` into a
   well-formed empty result in `off`/`shuffled` mode while leaving the four
   mutating tools live. `runtime.ts`'s `prepareTurn` stamps a
-  `memory.recall.mode` causal event every wake, in every mode.
-- `mcp/` exposes the same tool contract through Model Context Protocol.
-- `cli/` provides the local `mneme` entrypoint. `export.ts` is the thin
-  `mneme export --runtime-home <path> --agent-id <id> [--exported-at
-  <iso>]` command: it only parses argv/env and calls
-  `store/memoryExport.ts`'s `exportMemoriesToFile`, per this repo's CLI
-  philosophy (business logic stays in store/kernel modules).
+  `memory.recall.mode` causal event every wake, in every mode, and returns a
+  frozen copy of the exact finite `allowedScopes` used for recall. Its
+  `recordTurn` accepts only the configured bank's agent and stamps one exact
+  `memory.written` causal fact for every persisted domain fact.
+- `mcp/` exposes the same tool contract through Model Context Protocol and
+  lowers only finite trusted `allowedScopes`; it never grants unrestricted
+  `all` through the descriptor/MCP path.
+- `cli/` provides the local `mneme` entrypoint. `mneme seal` writes the
+  authority-owned final and exports it; `mneme export` re-exports an existing
+  final. Both require an explicit `--run-id` or injected `NOOPOLIS_RUN_ID`;
+  retrying the exact seal is an idempotent no-op before re-export. Neither
+  command can select a bank or dump `events.jsonl`.
 - `index.ts` is the public Mneme barrel used by Daimon and future extraction.
 
 ## Rules
@@ -111,3 +103,7 @@ package.
 - Treat the JSONL ledger as source of truth. Indexes and summaries must be
   rebuildable projections.
 - MCP must call the same `MemoryKernel` path as in-process integrations.
+- Tool authority signs the complete canonical envelope plus request, tool,
+  and argument digest. Kernel and recall-mode guards detach and freeze that
+  call before their first await, then execute and emit evidence only from the
+  verified snapshot. Evidence exports hashes, never raw args.

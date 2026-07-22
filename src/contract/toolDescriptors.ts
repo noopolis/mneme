@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   MemoryExecutableToolName,
   MemoryKernel,
@@ -11,15 +12,28 @@ import type {
 } from "./types.js";
 
 const defaultScopeAliases: MemoryToolCallEnvelope["allowed_scope_aliases"] = [
-  "all",
   "current",
   "global",
-  "public_profile",
-  "public_facts",
   "current_room",
   "current_pair",
   "current_task"
 ];
+
+const principalScopeId = (principal: MemoryToolCallEnvelope["principal"]): string =>
+  `agent:${principal.agentId}/scope:${principal.scope}${principal.qualifier ? `/qualifier:${principal.qualifier}` : ""}`;
+
+const finiteAllowedScopes = (context: MemoryToolExecutionContext): string[] => {
+  const requested = context.allowedScopes ?? [
+    principalScopeId(context.principal),
+    principalScopeId({ agentId: context.principal.agentId, scope: "global" })
+  ];
+  if (requested.length === 0 || requested.length > 32) throw new Error("memory tool context requires a bounded finite scope set");
+  const scopes = [...new Set(requested.map((scope) => scope.trim()))];
+  if (scopes.some((scope) => !scope || scope.toLowerCase() === "all" || scope.length > 512 || /[\u0000-\u001f\u007f]/u.test(scope))) {
+    throw new Error("memory tool context contains an invalid or unrestricted scope");
+  }
+  return scopes;
+};
 
 interface MemoryToolSpec {
   name: MemoryExecutableToolName;
@@ -266,6 +280,8 @@ export const createMemoryToolEnvelope = (
   context: MemoryToolExecutionContext
 ): MemoryToolCallEnvelope => {
   const mode = context.mode ?? "awake";
+  const aliases = context.allowedScopeAliases ?? defaultScopeAliases;
+  if (aliases.includes("all")) throw new Error("memory tool context may not grant the unrestricted all alias");
   return {
     version: "mneme.memory.tool.v1",
     mode,
@@ -275,7 +291,8 @@ export const createMemoryToolEnvelope = (
     conversation_scope: context.conversationScope,
     audience_key: context.audienceKey ?? context.principal.agentId,
     policy_version: context.policyVersion ?? "memory-policy.v1",
-    allowed_scope_aliases: context.allowedScopeAliases ?? defaultScopeAliases,
+    allowed_scope_aliases: aliases,
+    allowed_scopes: finiteAllowedScopes(context),
     transport: context.transport ?? "in_process",
     nonce: context.nonce ?? `${context.wakeId}:${Date.now()}`,
     expires_at: context.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
@@ -287,12 +304,17 @@ const createMemoryToolCall = (
   tool: MemoryExecutableToolName,
   argumentsValue: Record<string, unknown>,
   context: MemoryToolExecutionContext
-): MemoryToolCall => ({
-  request_id: `${context.wakeId}:${tool}:${Date.now()}`,
-  tool,
-  arguments: argumentsValue,
-  envelope: createMemoryToolEnvelope(context)
-});
+): MemoryToolCall => {
+  if (!context.authority) throw new Error("memory tool invocation requires a trusted authority handoff");
+  const request_id = `${context.wakeId}:${tool}:${randomUUID()}`;
+  const envelope = createMemoryToolEnvelope(context);
+  return {
+    request_id,
+    tool,
+    arguments: argumentsValue,
+    envelope: { ...envelope, authority: context.authority.issue({ request_id, tool, arguments: argumentsValue, envelope }) }
+  };
+};
 
 const executeMemoryTool = (
   kernel: MemoryKernel,

@@ -7,11 +7,14 @@ import test from "node:test";
 import { JsonlMemoryStore } from "../store/store.js";
 import { createMemoryKernel } from "./kernel.js";
 import { memoryScopeId } from "../identity/ids.js";
+import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import type { MemoryToolCall } from "../contract/types.js";
 
 type Principal = { agentId: string; scope: "global" | "room" | "pair" | "team" | "role" | "task" | "artifact"; qualifier?: string };
 
 const tempRoots: string[] = [];
+const TEST_AUTHORITY = { secret: "kernel-test-authority", bankId: "agent-a", runtimeId: "kernel-test-runtime" };
+const testHandoff = createMemoryAuthorityHandoff(TEST_AUTHORITY);
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-kernel-"));
   tempRoots.push(directory);
@@ -43,7 +46,7 @@ const seedText = async (
 const envelope = (principal: Principal) => ({
   version: "mneme.memory.tool.v1" as const,
   mode: "awake" as const,
-  wake_id: "wake-kernel",
+  wake_id: "daimon:wake-kernel",
   thread_id: "thread-kernel",
   principal,
   conversation_scope: "noopolis:agora",
@@ -63,17 +66,15 @@ const call = (
   tool: MemoryToolCall["tool"],
   principal: Principal,
   args: Record<string, unknown>
-): MemoryToolCall => ({
-  request_id: requestId,
-  tool,
-  arguments: args,
-  envelope: envelope(principal)
-});
+): MemoryToolCall => {
+  const unsigned = { ...envelope(principal), nonce: `nonce:${requestId}` };
+  return { request_id: requestId, tool, arguments: args, envelope: { ...unsigned, authority: testHandoff.issue({ request_id: requestId, tool, arguments: args, envelope: unsigned }) } };
+};
 
 test("search and locate do not leak private content", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
   const requester: Principal = { agentId: "agent-a", scope: "room", qualifier: "noopolis:agora" };
 
   const privateId = await seedText(store, {
@@ -109,15 +110,39 @@ test("search and locate do not leak private content", async () => {
     query: "PRIVATE_MARKER"
   }));
 
-  assert.equal(searchResult.decision, "known_but_private");
+  assert.equal(searchResult.decision, "deny");
   assert.equal(searchResult.content.some((entry) => entry.text?.includes("PRIVATE_MARKER")), false);
   assert.equal(searchResult.content.every((entry) => !entry.event_ids.includes(privateId)), true);
+});
+
+test("B45 search and locate audit metadata omit unauthorized source principals", async () => {
+  const root = await tempDir();
+  const store = new JsonlMemoryStore(root);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
+  const requester: Principal = { agentId: "agent-a", scope: "room", qualifier: "noopolis:agora" };
+  const unauthorized: Principal = { agentId: "agent-b", scope: "pair", qualifier: "agent-c" };
+  await seedText(store, unauthorized, {
+    scope: memoryScopeId(requester),
+    visibility: "private",
+    text: "UNAUTHORIZED_AUDIT_MARKER"
+  });
+
+  const search = await kernel.search(call("audit-search", "memory.search", requester, {
+    scope: "current", query: "UNAUTHORIZED_AUDIT_MARKER"
+  }));
+  assert.equal(search.audit.sources.some((source) => source.agentId === "agent-b"), false);
+
+  const locate = await kernel.locate(call("audit-locate", "memory.locate", requester, {
+    query: "UNAUTHORIZED_AUDIT_MARKER"
+  }));
+  assert.equal(locate.audit.sources.some((source) => source.agentId === "agent-b"), false);
+  assert.equal(JSON.stringify({ search, locate }).includes("UNAUTHORIZED_AUDIT_MARKER"), false);
 });
 
 test("register requires evidence to persist", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
   const principal: Principal = { agentId: "agent-a", scope: "global" };
   const evidence = await seedText(store, principal, {
     visibility: "global",
@@ -155,7 +180,7 @@ test("register requires evidence to persist", async () => {
 test("summarize returns provenance and stores a summary event", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
   const principal: Principal = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
   const first = await seedText(store, principal, { visibility: "global", text: "SUMMARY_A marker one" });
@@ -181,7 +206,7 @@ test("summarize returns provenance and stores a summary event", async () => {
 test("forget writes tombstones and suppresses source in search", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test" });
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
   const principal: Principal = { agentId: "agent-a", scope: "global" };
   const scope = memoryScopeId(principal);
 

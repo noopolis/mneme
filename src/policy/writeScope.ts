@@ -29,10 +29,11 @@ export type WriteScopeCheckResult =
 /**
  * The set of scope strings a principal can legitimately produce through
  * `resolveScope`, given the trusted envelope's own alias grants: its own
- * canonical scope (the "current" alias), its own global variant when the
- * envelope grants the "global" alias, and the literal "all" wildcard when
- * the envelope grants the "all" alias. Any resolved scope outside this set
- * was not derived from this principal's own identity.
+ * canonical scope (the "current" alias) and its own global variant when the
+ * envelope grants the "global" alias. The literal "all" wildcard is never a
+ * normal write grant; only the trusted system capability may cross scopes.
+ * Any resolved scope outside this set was not derived from this principal's
+ * own identity.
  */
 const derivableWriteScopes = (
   principal: MemoryPrincipalRef,
@@ -43,10 +44,6 @@ const derivableWriteScopes = (
   if (allowedScopeAliases.includes("global")) {
     scopes.add(memoryScopeId({ agentId: principal.agentId, scope: "global" }));
   }
-  if (allowedScopeAliases.includes("all")) {
-    scopes.add("all");
-  }
-
   return scopes;
 };
 

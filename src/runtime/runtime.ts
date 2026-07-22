@@ -1,10 +1,13 @@
 import { buildWakePacketText } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
-import { appendMemoryRecalledEvent, CausalEventStore } from "../store/causalStore.js";
+import { appendMemoryRecalledEvent, appendMemoryWrittenEvent, CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { readMemoryContext, resolveScopePlan } from "../identity/scope.js";
 import { createMemoryKernel } from "../kernel/kernel.js";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { createEphemeralMemoryAuthority, createMemoryAuthorityHandoff, type MemoryAuthorityConfig } from "../policy/authority.js";
 import { memoryStreamId, resolveCausalRunId } from "../contract/causal.js";
 import {
   buildDecisionEvents,
@@ -50,7 +53,12 @@ export interface JsonlMemoryRuntimeConfig {
   /** B70 ablation knob; see recallMode.ts. Resolution order: this field, then
    * the MNEME_RECALL_MODE env var, then default "on". */
   recallMode?: MemoryRecallMode;
+  /** Trusted deployment adapter may supply a stable verifier across restarts. */
+  authority?: MemoryAuthorityConfig;
 }
+
+export const memoryAuthorityRuntimeId = (runtimeHomePath: string): string =>
+  `runtime:${createHash("sha256").update(path.resolve(runtimeHomePath)).digest("hex")}`;
 
 export class JsonlMemoryRuntime implements MemoryRuntime {
   private readonly store: JsonlMemoryStore;
@@ -61,6 +69,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
   private readonly embeddingProvider?: MemoryEmbeddingProvider;
   private readonly recallMode: MemoryRecallMode;
   public readonly kernel: MemoryKernel;
+  public readonly authority;
 
   constructor(private readonly options: JsonlMemoryRuntimeConfig) {
     this.store = new JsonlMemoryStore(options.runtimeHomePath);
@@ -70,6 +79,13 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     this.source = options.source ?? defaultSource(options.agentId);
     this.defaultTokenBudget = clampTokenBudget(options.tokenBudget);
     this.recallMode = resolveRecallMode(options.recallMode);
+    const runtimeId = memoryAuthorityRuntimeId(options.runtimeHomePath);
+    const generatedAuthority = createEphemeralMemoryAuthority(options.agentId, runtimeId);
+    const authority = options.authority ?? generatedAuthority.config;
+    if (authority.bankId !== options.agentId || authority.runtimeId !== runtimeId) {
+      throw new Error("memory authority does not match this bank/runtime");
+    }
+    this.authority = options.authority ? createMemoryAuthorityHandoff(authority) : generatedAuthority.handoff;
     this.kernel = guardKernelForRecallMode(
       createMemoryKernel({
         runtimeHomePath: options.runtimeHomePath,
@@ -78,9 +94,11 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
         // Share this runtime's own CausalEventStore rather than letting the
         // kernel mint a second one against the same causal.jsonl (see
         // kernel/kernel.ts's MemoryKernelConfig.causalStore doc comment).
-        causalStore: this.causalStore
+        causalStore: this.causalStore,
+        authority
       }),
-      this.recallMode
+      this.recallMode,
+      { runtimeHomePath: options.runtimeHomePath, authority, causalStore: this.causalStore }
     );
   }
 
@@ -248,6 +266,9 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
 
     return {
       principal: scopePlan.activePrincipal,
+      // This is the public trusted handoff for adapter-owned tool contexts;
+      // adapters do not need to import Mneme's private scope planner.
+      allowedScopes: Object.freeze([...scopeIds]),
       packet: recall.packet,
       promptText,
       recall: recall.audit,
@@ -256,13 +277,23 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
   }
 
   async recordTurn(input: MemoryTurnRecord): Promise<void> {
-    const scope = memoryScopeId(input.principal);
+    // Detach the trusted record synchronously so caller mutations cannot
+    // change bank identity or evidence inputs across the reads below.
+    const record = structuredClone(input);
+    if (record.principal.agentId !== this.options.agentId) {
+      throw new Error("memory turn principal does not own this runtime bank");
+    }
+    if (!/^(simfile|moltnet|mneme|daimon):.+$/u.test(record.request.eventId)) {
+      throw new Error("memory turn requires a causal request event id");
+    }
+    const causalRunId = resolveCausalRunId();
+    const scope = memoryScopeId(record.principal);
     const parentEventIds = (await this.store.read({
-      principalAgentId: input.principal.agentId,
-      principalScope: input.principal.scope
+      principalAgentId: record.principal.agentId,
+      principalScope: record.principal.scope
     })).map((event) => event.id);
 
-    const recall = input.recall ?? {
+    const recall = record.recall ?? {
       totalCandidates: 0,
       selectedEventIds: [],
       selected: [],
@@ -272,27 +303,39 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     };
 
     const events: MemoryEventInput[] = buildDecisionEvents({
-      principal: input.principal,
+      principal: record.principal,
       scope,
       source: this.source,
-      request: input.request,
-      packet: input.prompt,
+      request: record.request,
+      packet: record.prompt,
       recall,
-      result: input.result,
-      outputText: input.outputText,
-      error: input.error,
+      result: record.result,
+      outputText: record.outputText,
+      error: record.error,
       parentEventIds
     });
 
-    const toolSummary = selectToolSummary(input.toolEvents ?? []);
+    const toolSummary = selectToolSummary(record.toolEvents ?? []);
     if (toolSummary) {
       toolSummary.parentEventIds = parentEventIds;
       toolSummary.scope = scope;
-      toolSummary.principal = input.principal;
+      toolSummary.principal = record.principal;
       events.push(toolSummary);
     }
 
-    await this.store.appendBatch(events);
+    const persisted = await this.store.appendBatch(events);
+    for (const event of persisted) {
+      await appendMemoryWrittenEvent(this.causalStore, {
+        runId: causalRunId,
+        agentId: this.options.agentId,
+        principalId: `agent:${this.options.agentId}`,
+        causeEventIds: [record.request.eventId],
+        memoryId: event.memoryId ?? event.id,
+        revisionId: event.id,
+        scope: event.scope,
+        contentSha256: event.checksum
+      });
+    }
   }
 }
 

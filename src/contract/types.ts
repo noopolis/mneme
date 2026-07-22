@@ -21,14 +21,18 @@ export interface MemoryToolCallEnvelope {
   conversation_scope: string;
   audience_key: string;
   policy_version: string;
-	  allowed_scope_aliases: ReadonlyArray<
+  allowed_scope_aliases: ReadonlyArray<
 	    "all" | "current" | "global" | "public_profile" | "public_facts" |
 	    "current_room" | "current_pair" | "current_task"
-	  >;
+  >;
+  /** Finite canonical scopes minted by the trusted adapter for this turn. */
+  allowed_scopes?: ReadonlyArray<string>;
   transport: "in_process" | "mcp" | "protocol" | "text_loop";
   nonce: string;
   expires_at: string;
   capability: string;
+  /** HMAC handoff issued by a trusted adapter; model arguments never supply it. */
+  authority?: string;
 }
 
 export type MemoryToolName =
@@ -59,10 +63,18 @@ export interface MemoryToolExecutionContext {
   audienceKey?: string;
   policyVersion?: string;
   allowedScopeAliases?: MemoryToolCallEnvelope["allowed_scope_aliases"];
+  /** Exact finite scopes minted by the trusted adapter for this turn. */
+  allowedScopes?: ReadonlyArray<string>;
   transport?: MemoryToolCallEnvelope["transport"];
   expiresAt?: string;
   nonce?: string;
   capability?: string;
+  /** Trusted adapter-owned signer. Absence fails closed at the descriptor boundary. */
+  authority?: {
+    readonly bankId: string;
+    readonly runtimeId: string;
+    issue(call: Omit<MemoryToolCall, "envelope"> & { envelope: Omit<MemoryToolCallEnvelope, "authority"> }): string;
+  };
 }
 
 export interface MemoryToolCall {
@@ -148,7 +160,6 @@ export interface MemoryRegisterArguments {
   evidence_event_ids: string[];
   source_type: string;
   confidence?: number;
-  principal?: MemoryPrincipalRef;
   /** When set, register this as a new revision of an existing memory chain. */
   memory_id?: string;
 }
@@ -324,6 +335,8 @@ export interface MemoryRecallRequest {
 
 export interface MemoryPrepareTurnResult {
   principal: MemoryPrincipalRef;
+  /** Exact finite scopes resolved by Mneme for this trusted turn. */
+  readonly allowedScopes: ReadonlyArray<string>;
   packet: MemoryPacket;
   promptText: string;
   recall: MemoryRecallAudit;
@@ -358,4 +371,6 @@ export interface MemoryRuntime {
   prepareTurn(request: MemoryRecallRequest): Promise<MemoryPrepareTurnResult>;
   recordTurn(input: MemoryTurnRecord): Promise<void>;
   kernel: MemoryKernel;
+  /** Adapter seam for descriptor/MCP calls; it is not model-facing input. */
+  authority: NonNullable<MemoryToolExecutionContext["authority"]>;
 }

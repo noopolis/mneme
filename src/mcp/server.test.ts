@@ -168,6 +168,25 @@ test("MCP register tool writes memories that search can read", async () => {
   }
 });
 
+test("B45 MCP arguments cannot inject authority identity or scope grants", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({ runtimeHomePath: root, agentId: "keeper" });
+  const client = new Client({ name: "mneme-injection-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport); await client.connect(clientTransport);
+  try {
+    const result = await client.callTool({ name: "memory_register", arguments: {
+      scope: "current", kind: "text", content: { kind: "text", text: "MCP_AUTHORITY_INJECTION" }, visibility: "private",
+      sensitivity: "normal", evidence_event_ids: ["evt_external"], source_type: "mcp-test",
+      principal: { agentId: "attacker", scope: "global" }, audience_key: "attacker", allowed_scopes: ["all"], capability: "mneme.cap.system.v1"
+    } });
+    assert.equal(JSON.parse(firstTextContent(result)).decision, "allow_raw");
+    const events = await new JsonlMemoryStore(root).read();
+    assert.equal(events.at(-1)?.principal.agentId, "keeper");
+    assert.notEqual(events.at(-1)?.scope, "all");
+  } finally { await client.close(); await server.close(); }
+});
+
 test("MCP dream-mode memory_promote tool promotes a registered memory end to end", async () => {
   const root = await tempDir();
   const server = createMnemeMcpServer({

@@ -10,6 +10,7 @@ interface SearchInput {
   limit: number;
   allEvents: MemoryEvent[];
   requester: MemoryPrincipalRef;
+  allowedScopes: string[];
   embeddingProvider?: MemoryEmbeddingProvider;
   index: {
     query: (input: {
@@ -41,7 +42,7 @@ const maybeQueryByEmbedding = async (
 ): Promise<{ events: Array<{ event: MemoryEvent; score: number }>; scores: Map<string, number> | undefined }> => {
   try {
     const semantic = await input.index.queryByEmbedding({
-      allowedScopes: resolvedScope === "all" ? undefined : [resolvedScope],
+      allowedScopes: resolvedScope === "all" ? input.allowedScopes : [resolvedScope],
       queryVector,
       embeddingProvider: input.embeddingProvider!,
       limit: queryLimit
@@ -58,7 +59,7 @@ const maybeQueryByEmbedding = async (
   }
 
   return { events: await input.index.query({
-    allowedScopes: resolvedScope === "all" ? undefined : [resolvedScope],
+    allowedScopes: resolvedScope === "all" ? input.allowedScopes : [resolvedScope],
     query: queryText,
     limit: queryLimit
   }), scores: undefined };
@@ -71,7 +72,7 @@ export const prepareSearchCandidates = async (input: SearchInput): Promise<Searc
   const queryText = input.queryText;
 
   let queryEvents = await input.index.query({
-    allowedScopes: resolvedScope === "all" ? undefined : [resolvedScope],
+    allowedScopes: resolvedScope === "all" ? input.allowedScopes : [resolvedScope],
     query: queryText,
     limit: queryLimit
   });

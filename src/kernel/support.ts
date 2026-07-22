@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { canonicalScopeKey, memoryScopeId, sanitizePrincipalQualifier } from "../identity/ids.js";
+import { hashCanonicalJson } from "../contract/causal.js";
 import { memoryStreamId, resolveCausalRunId } from "../contract/causal.js";
 import type { CausalEventStore } from "../store/causalStore.js";
 import type {
@@ -9,6 +11,7 @@ import type {
   MemoryContent,
   MemoryForgetArguments,
   MemoryLocateArguments,
+  MemoryPrincipalRef,
   MemoryPromoteArguments,
   MemoryRegisterArguments,
   MemorySearchArguments,
@@ -132,7 +135,8 @@ export const isRegisterArguments = (value: unknown): value is MemoryRegisterArgu
   && Array.isArray(value.evidence_event_ids)
   && value.evidence_event_ids.length > 0
   && value.evidence_event_ids.every((id) => isString(id))
-  && (value.memory_id === undefined || hasText(value.memory_id));
+  && (value.memory_id === undefined || hasText(value.memory_id))
+  && !Object.prototype.hasOwnProperty.call(value, "principal");
 
 export const isPromoteArguments = (value: unknown): value is MemoryPromoteArguments =>
   isPlainObject(value) && hasText(value.scope) && hasText(value.memory_id);
@@ -145,7 +149,9 @@ export const isForgetArguments = (value: unknown): value is MemoryForgetArgument
   return hasText(value.scope)
     && Array.isArray(value.event_ids)
     && value.event_ids.length > 0
-    && value.event_ids.every((id) => isString(id));
+    && value.event_ids.length <= 256
+    && value.event_ids.every((id) => isString(id))
+    && new Set(value.event_ids).size === value.event_ids.length;
 };
 
 export const makeAudit = (
@@ -158,8 +164,16 @@ export const makeAudit = (
   sources: sources.map((event) => event.principal),
   transport: call.envelope.transport,
   latency_ms: Date.now() - startAt,
-  argument_hash: canonicalScopeKey(JSON.stringify(call.arguments))
+  argument_hash: hashArgumentsForEvidence(call.arguments)
 });
+
+export const hashArgumentsForEvidence = (value: unknown): string => {
+  try {
+    return hashCanonicalJson(value);
+  } catch {
+    return createHash("sha256").update("invalid-canonical-arguments").digest("hex");
+  }
+};
 
 export const malformed = (call: MemoryToolCall, tool: MemoryToolName, error: string, startAt: number): MemoryToolResult => ({
   request_id: call.request_id,
@@ -176,7 +190,7 @@ export const unavailable = (call: MemoryToolCall, tool: MemoryToolName, error: s
   decision: "unavailable",
   content: [],
   audit: makeAudit(call, [], startAt),
-  error
+  error: "memory service unavailable"
 });
 
 export const eventText = (event: MemoryEvent): string => {
@@ -197,9 +211,10 @@ export const resultKind = (kind: MemoryEventType | MemoryEvent["content"]["kind"
 
 export const policyText = (decision: MemoryDecision, text: string): string => {
   if (decision === "allow_raw") return text;
-  if (decision === "allow_summary" || decision === "allow_redacted_summary") {
+  if (decision === "allow_summary") {
     return text.length > 150 ? `${text.slice(0, 147)}...` : text;
   }
+  if (decision === "allow_redacted_summary") return "Memory is available only in redacted form.";
   if (decision === "known_but_private") {
     return "Related private context is available behind policy.";
   }
@@ -251,7 +266,7 @@ export const denyWriteScope = async (
   call: MemoryToolCall,
   tool: MemoryToolName,
   scope: string,
-  reason: string,
+  _reason: string,
   startAt: number
 ): Promise<MemoryToolResult> => {
   const principal = sanitizePrincipal(call.envelope.principal);
@@ -265,10 +280,10 @@ export const denyWriteScope = async (
     source: "mneme/policy",
     content: {
       kind: "text",
-      text: `Denied ${tool} write to scope ${scope}: ${reason}`
+      text: "Denied memory write by scope policy."
     },
     tags: ["denied", "write"],
-    entities: [principal.agentId, scope],
+    entities: [principal.agentId],
     sensitivity: "normal",
     parentEventIds: []
   } satisfies MemoryEventInput);
@@ -278,11 +293,11 @@ export const denyWriteScope = async (
     streamId: memoryStreamId(principal.agentId),
     type: "memory.write.denied",
     principalId: `agent:${principal.agentId}`,
-    causeEventIds: [],
+    causeEventIds: [call.envelope.wake_id],
     payload: {
       tool,
-      requested_scope: scope,
-      reason
+      requested_scope_sha256: createHash("sha256").update(scope).digest("hex"),
+      reason_code: "scope-not-authorized"
     }
   });
 
@@ -292,7 +307,7 @@ export const denyWriteScope = async (
     decision: "deny",
     content: [],
     audit: makeAudit(call, [], startAt),
-    error: reason
+    error: "memory write scope is not authorized"
   };
 };
 
@@ -300,6 +315,15 @@ export const sanitizePrincipal = (principal: MemoryToolCallEnvelope["principal"]
   ...principal,
   qualifier: principal.qualifier ? sanitizePrincipalQualifier(principal.qualifier) : undefined
 });
+
+export const ownsMemoryTarget = (
+  event: MemoryEvent | undefined,
+  scope: string,
+  principal: MemoryPrincipalRef
+): event is MemoryEvent => Boolean(event && event.scope === scope
+  && event.principal.agentId === principal.agentId
+  && event.principal.scope === principal.scope
+  && event.principal.qualifier === principal.qualifier);
 
 export const collectTombstones = (events: MemoryEvent[]): Set<string> => {
   const redacted = new Set<string>();
@@ -342,8 +366,7 @@ export const makeSearchResult = (decision: MemoryDecision, event: MemoryEvent) =
   kind: resultKind(event.content.kind),
   text: policyText(decision, eventText(event)),
   event_ids: canExposeEventId(decision) ? [event.id] : [],
-  scope: event.scope,
-  principal: event.principal,
+  ...(canExposeEventId(decision) ? { scope: event.scope, principal: event.principal } : {}),
   confidence: 1,
   redactions: decision === "allow_redacted_summary" || decision === "known_but_private" ? ["redacted"] : []
 });
@@ -351,8 +374,7 @@ export const makeSearchResult = (decision: MemoryDecision, event: MemoryEvent) =
 export const makeLocateResult = (entry: CandidateHandle) => ({
   kind: "locate" as const,
   event_ids: canExposeEventId(entry.decision) ? entry.eventIds : [],
-  scope: entry.scope,
-  principal: entry.event.principal,
+  ...(canExposeEventId(entry.decision) ? { scope: entry.scope, principal: entry.event.principal } : {}),
   confidence: Math.min(1, entry.score / 10),
   redactions: ["content-omitted"]
 });

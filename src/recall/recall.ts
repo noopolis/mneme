@@ -68,7 +68,7 @@ const buildRepresentation = (decision: MemoryDecision, event: MemoryEvent): stri
     return summary.length < base.length ? `${summary}...` : summary;
   }
   if (decision === "allow_redacted_summary") {
-    return `[redacted] ${base.slice(0, 100)}...`;
+    return "Memory is available only in redacted form.";
   }
   if (decision === "known_but_private") {
     return "Related private context is available behind policy.";

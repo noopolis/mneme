@@ -1,5 +1,10 @@
 import { rankCandidates, runRecall } from "../recall/recall.js";
 import { clampTokenBudget } from "./support.js";
+import { createHash } from "node:crypto";
+import { resolveCausalRunId } from "../contract/causal.js";
+import { MemoryAuthorityGuard, snapshotMemoryToolCall, type MemoryAuthorityConfig } from "../policy/authority.js";
+import { appendToolOutcomeEvent, appendToolRequestEvent, type CausalEventStore } from "../store/causalStore.js";
+import { hashArgumentsForEvidence } from "../kernel/support.js";
 import type { MemoryRecallEntry } from "./support.js";
 import type {
   MemoryEvent,
@@ -178,7 +183,13 @@ export const buildShuffledRecall = (input: RecallModeInput): RecallModeResult =>
  * candidates through the tool surface. Mutating tools (register, summarize,
  * forget, promote) stay live in every mode — the ablation is recall-only.
  */
-export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecallMode): MemoryKernel => {
+export interface RecallModeEvidenceConfig {
+  runtimeHomePath: string;
+  authority: MemoryAuthorityConfig;
+  causalStore: CausalEventStore;
+}
+
+export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecallMode, evidence?: RecallModeEvidenceConfig): MemoryKernel => {
   if (mode === "on") {
     return kernel;
   }
@@ -194,13 +205,66 @@ export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecal
       sources: [],
       transport: call.envelope.transport,
       latency_ms: 0,
-      argument_hash: `recall_mode=${mode}`
+      argument_hash: hashArgumentsForEvidence(call.arguments)
     }
   });
 
+  const guard = evidence ? new MemoryAuthorityGuard(evidence.runtimeHomePath, evidence.authority) : undefined;
+  const unavailableRead = (call: MemoryToolCall, tool: "memory.search" | "memory.locate", startAt: number): MemoryToolResult => ({
+    ...emptyResult(call, tool), decision: "unavailable", error: "memory evidence unavailable",
+    audit: { ...emptyResult(call, tool).audit, latency_ms: Date.now() - startAt }
+  });
+  const malformedRead = async (call: MemoryToolCall, tool: "memory.search" | "memory.locate", startAt: number): Promise<MemoryToolResult> => {
+    if (!evidence) return { ...emptyResult(call, tool), decision: "malformed_request", error: "invalid authority" };
+    try {
+      await appendToolOutcomeEvent(evidence.causalStore, {
+        runId: resolveCausalRunId(), agentId: "mneme-system", principalId: "system:mneme", causeEventIds: [], tool,
+        decision: "malformed_request", argumentHash: hashArgumentsForEvidence(call.arguments), requestHash: createHash("sha256").update(call.request_id).digest("hex")
+      });
+    } catch { return unavailableRead(call, tool, startAt); }
+    return {
+      ...emptyResult(call, tool), decision: "malformed_request", error: "invalid authority",
+      audit: { ...emptyResult(call, tool).audit, latency_ms: Date.now() - startAt }
+    };
+  };
+  const deniedRead = async (call: MemoryToolCall, tool: "memory.search" | "memory.locate"): Promise<MemoryToolResult> => {
+    const startAt = Date.now();
+    let attemptedCall: MemoryToolCall;
+    try { attemptedCall = snapshotMemoryToolCall(call); } catch { return { ...emptyResult(call, tool), decision: "malformed_request", error: "invalid authority" }; }
+    if (!guard || !evidence) return emptyResult(attemptedCall, tool);
+    if (attemptedCall.tool !== tool) return malformedRead(attemptedCall, tool, startAt);
+    let verifiedCall: MemoryToolCall;
+    try {
+      verifiedCall = await guard.consume(attemptedCall);
+    } catch {
+      return malformedRead(attemptedCall, tool, startAt);
+    }
+    try {
+      if (verifiedCall.envelope.transport === "mcp") {
+        await appendToolRequestEvent(evidence.causalStore, {
+          runId: resolveCausalRunId(),
+          agentId: verifiedCall.envelope.principal.agentId,
+          principalId: `agent:${verifiedCall.envelope.principal.agentId}`,
+          eventId: verifiedCall.envelope.wake_id,
+          tool,
+          argumentHash: hashArgumentsForEvidence(verifiedCall.arguments),
+          requestHash: createHash("sha256").update(verifiedCall.request_id).digest("hex"),
+          authorityHash: createHash("sha256").update(verifiedCall.envelope.authority ?? "").digest("hex")
+        });
+      }
+      await appendToolOutcomeEvent(evidence.causalStore, {
+        runId: resolveCausalRunId(), agentId: verifiedCall.envelope.principal.agentId, principalId: `agent:${verifiedCall.envelope.principal.agentId}`,
+        causeEventIds: [verifiedCall.envelope.wake_id], tool, decision: "deny", argumentHash: hashArgumentsForEvidence(verifiedCall.arguments), requestHash: createHash("sha256").update(verifiedCall.request_id).digest("hex"),
+        authorityHash: createHash("sha256").update(verifiedCall.envelope.authority ?? "").digest("hex")
+      });
+      return emptyResult(verifiedCall, tool);
+    } catch {
+      return unavailableRead(verifiedCall, tool, startAt);
+    }
+  };
   return {
-    search: async (call) => emptyResult(call, "memory.search"),
-    locate: async (call) => emptyResult(call, "memory.locate"),
+    search: (call) => deniedRead(call, "memory.search"),
+    locate: (call) => deniedRead(call, "memory.locate"),
     register: (call) => kernel.register(call),
     summarize: (call) => kernel.summarize(call),
     forget: (call) => kernel.forget(call),

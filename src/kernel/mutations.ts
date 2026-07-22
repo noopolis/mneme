@@ -1,8 +1,6 @@
 import { projectLifecycle } from "../store/lifecycle.js";
 import type { JsonlMemoryStore } from "../store/store.js";
-import { appendMemoryWrittenEvent } from "../store/causalStore.js";
 import type { CausalEventStore } from "../store/causalStore.js";
-import { resolveCausalRunId } from "../contract/causal.js";
 import { memoryPolicy } from "../policy/policy.js";
 import { assertToolCapability } from "../policy/capability.js";
 import { assertWriteScope } from "../policy/writeScope.js";
@@ -24,25 +22,17 @@ import {
   isSummarizeArguments,
   makeAudit,
   malformed,
+  ownsMemoryTarget,
   unavailable,
   policyText,
   resolveScope,
   sanitizePrincipal
 } from "./support.js";
+import { recordMemoryForgottenEvidence, recordMemoryPromotedEvidence, recordMemorySummaryEvidence, recordMemoryWriteEvidence } from "./mutationEvidence.js";
 
-/**
- * The four mutating memory tools (register/summarize/forget/promote), split
- * out of kernel.ts to keep that file under the repo's 400-line limit. Each
- * function is a thin, capability-gated wrapper called directly from
- * JsonlMemoryKernel's methods of the same name — no behavior lives only
- * here that the kernel class doesn't delegate to.
- *
- * B62: after the existing capability gate, every mutating tool also calls
- * `assertWriteScope` against the trusted envelope principal/aliases (never
- * `args`, never the possibly-args-overridden `principal` local used below
- * for register) before touching the store, closing the cross-scope write
- * hole in kernel/support.ts's `resolveScope`.
- */
+/** Four capability- and scope-gated mutating memory tools, split from the
+ * kernel to keep both production modules bounded. Trusted identity and scope
+ * grants always come from the envelope, never model arguments. */
 
 export const registerMemory = async (
   store: JsonlMemoryStore,
@@ -62,14 +52,9 @@ export const registerMemory = async (
     return malformed(call, "memory.register", "memory.register requires evidence and content fields", startAt);
   }
 
-  const principal = args.principal
-    ? sanitizePrincipal(args.principal)
-    : sanitizePrincipal(call.envelope.principal);
+  const principal = sanitizePrincipal(call.envelope.principal);
   const scope = resolveScope(args.scope, principal);
 
-  // Deliberately checked against call.envelope.principal, NOT the `principal`
-  // local above (which may be args.principal, i.e. model-supplied) — the
-  // trusted envelope identity is the only legitimate origin for this check.
   const writeScopeCheck = assertWriteScope(
     call.envelope.principal,
     call.envelope.allowed_scope_aliases,
@@ -86,10 +71,14 @@ export const registerMemory = async (
       const existing = await store.read({ scope });
       const head = projectLifecycle(existing).heads.get(args.memory_id);
       if (!head) {
-        return malformed(call, "memory.register", `unknown memory_id: ${args.memory_id}`, startAt);
+        return malformed(call, "memory.register", "memory target was not found", startAt);
       }
       if (head.state === "forgotten") {
-        return malformed(call, "memory.register", `memory ${args.memory_id} is forgotten`, startAt);
+        return malformed(call, "memory.register", "memory target is not active", startAt);
+      }
+      const revision = existing.find((event) => event.id === head.revisionId);
+      if (!ownsMemoryTarget(revision, scope, principal)) {
+        return malformed(call, "memory.register", "memory revision target is not authorized", startAt);
       }
       parentEventIds = [...new Set([...args.evidence_event_ids, head.revisionId])];
     }
@@ -122,16 +111,7 @@ export const registerMemory = async (
     // `runtime/recallMode.ts` `guardKernelForRecallMode`, which leaves all
     // four mutating tools live in every mode), so a write is never gated by
     // the recall ablation.
-    await appendMemoryWrittenEvent(causalStore, {
-      runId: resolveCausalRunId(),
-      agentId: principal.agentId,
-      principalId: `agent:${principal.agentId}`,
-      causeEventIds: [call.envelope.wake_id],
-      memoryId: event.memoryId ?? event.id,
-      revisionId: event.id,
-      scope: event.scope,
-      contentSha256: event.checksum
-    });
+    await recordMemoryWriteEvidence(causalStore, call, event);
 
     return {
       request_id: call.request_id,
@@ -225,6 +205,9 @@ export const summarizeMemory = async (
       origin: capabilityCheck.origin
     } satisfies MemoryEventInput);
 
+    const sourceById = new Map(events.map((event) => [event.id, event]));
+    await recordMemorySummaryEvidence(causalStore, call, summary, sourceIds.map((id) => sourceById.get(id)!));
+
     return {
       request_id: call.request_id,
       tool: "memory.summarize",
@@ -278,6 +261,11 @@ export const forgetMemory = async (
   }
 
   try {
+    const targets = await store.read({ scope });
+    const targetById = new Map(targets.map((event) => [event.id, event]));
+    if (!args.event_ids.every((id) => ownsMemoryTarget(targetById.get(id), scope, requester))) {
+      return malformed(call, "memory.forget", "memory forget target is not authorized", startAt);
+    }
     const event = await store.append({
       type: "memory.forgotten",
       principal: requester,
@@ -295,6 +283,8 @@ export const forgetMemory = async (
       parentEventIds: args.event_ids,
       origin: capabilityCheck.origin
     } satisfies MemoryEventInput);
+
+    await recordMemoryForgottenEvidence(causalStore, call, event, args.event_ids.map((id) => targetById.get(id)!));
 
     return {
       request_id: call.request_id,
@@ -352,10 +342,14 @@ export const promoteMemory = async (
     const existing = await store.read({ scope });
     const head = projectLifecycle(existing).heads.get(args.memory_id);
     if (!head) {
-      return malformed(call, "memory.promote", `unknown memory_id: ${args.memory_id}`, startAt);
+      return malformed(call, "memory.promote", "memory target was not found", startAt);
     }
     if (head.state === "forgotten") {
-      return malformed(call, "memory.promote", `memory ${args.memory_id} is forgotten`, startAt);
+      return malformed(call, "memory.promote", "memory target is not active", startAt);
+    }
+    const revision = existing.find((event) => event.id === head.revisionId);
+    if (!ownsMemoryTarget(revision, scope, requester)) {
+      return malformed(call, "memory.promote", "memory promote target is not authorized", startAt);
     }
 
     const event = await store.append({
@@ -375,6 +369,8 @@ export const promoteMemory = async (
       memoryId: args.memory_id,
       origin: capabilityCheck.origin
     } satisfies MemoryEventInput);
+
+    await recordMemoryPromotedEvidence(causalStore, call, event, revision, args.memory_id);
 
     return {
       request_id: call.request_id,

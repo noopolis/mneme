@@ -10,7 +10,7 @@ import { CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { validateMemoryRecalledCausalEvent, validateMemoryWrittenCausalEvent } from "../contract/causal.js";
 import type { MemoryEmbeddingProvider } from "../store/embedding.js";
-import type { MemoryPrincipalRef, MemoryToolCall } from "../contract/types.js";
+import type { MemoryPrincipalRef, MemoryRuntime, MemoryToolCall } from "../contract/types.js";
 
 const tempRoots: string[] = [];
 
@@ -40,16 +40,16 @@ test.afterEach(async () => {
 });
 
 const memoryToolCall = (
+  runtime: MemoryRuntime,
   principal: MemoryPrincipalRef,
-  args: Record<string, unknown>
-): MemoryToolCall => ({
-  request_id: "runtime-test-memory-search",
-  tool: "memory.search",
-  arguments: args,
-	  envelope: {
+  args: Record<string, unknown>,
+  tool: MemoryToolCall["tool"] = "memory.search"
+): MemoryToolCall => {
+  const request_id = `runtime-test-memory-search:${Date.now()}:${Math.random()}`;
+  const envelope = {
 	    version: "mneme.memory.tool.v1",
 	    mode: "awake",
-	    wake_id: "runtime-test-wake",
+	    wake_id: "daimon:runtime-test-wake",
     thread_id: "runtime-test-thread",
     principal,
     conversation_scope: principal.qualifier ?? principal.scope,
@@ -57,11 +57,13 @@ const memoryToolCall = (
     policy_version: "test",
 	    allowed_scope_aliases: ["all", "current", "global", "current_room", "current_pair", "current_task"],
     transport: "in_process",
-    nonce: "runtime-test",
+    nonce: request_id,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     capability: "memory"
-  }
-});
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  return { request_id, tool, arguments: args, envelope: { ...envelope, authority: runtime.authority.issue({ request_id, tool, arguments: args, envelope }) } };
+};
 
 test("prepares a memory packet and wake prompt for message events", async () => {
   const root = await tempDir();
@@ -72,7 +74,7 @@ test("prepares a memory packet and wake prompt for message events", async () => 
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "evt-1",
+    eventId: "daimon:evt-1",
     kind: "message",
     from: "mapper",
     text: "What is the plan for this morning?",
@@ -86,6 +88,13 @@ test("prepares a memory packet and wake prompt for message events", async () => 
 
   assert.equal(turn.principal.scope, "room");
   assert.equal(turn.principal.qualifier, "noopolis:agora");
+  assert.equal(Object.isFrozen(turn.allowedScopes), true);
+  assert.deepEqual(new Set(turn.allowedScopes), new Set([
+    "agent:agent-a/scope:global",
+    "agent:agent-a/scope:room/qualifier:noopolis:agora",
+    "agent:agent-a/scope:team/qualifier:team-a",
+    "agent:agent-a/scope:pair/qualifier:mapper"
+  ]));
   assert.ok(turn.promptText.includes("Wake event"));
   assert.ok(turn.packet.sections.length >= 0);
   assert.equal(turn.recall.totalCandidates, 0);
@@ -111,7 +120,7 @@ test("records turn output and recall artifacts to the jsonl store", async () => 
       rawHint: "none"
     },
     request: {
-      eventId: "evt-record",
+      eventId: "daimon:evt-record",
       kind: "manual",
       text: "Summarize progress.",
       context: {
@@ -131,6 +140,32 @@ test("records turn output and recall artifacts to the jsonl store", async () => 
   assert.ok(events.some((event) => event.type === "memory.claimed"));
   assert.ok(events.some((event) => event.type === "memory.observed"));
   assert.ok(events.some((event) => event.type === "memory.located") === false);
+
+  const causalStore = new CausalEventStore(root);
+  const causal = await causalStore.read();
+  const written = causal.filter((event) => event.type === "memory.written");
+  assert.equal(written.length, events.length);
+  assert.deepEqual(new Set(written.map((event) => event.payload.revision_id)), new Set(events.map((event) => event.id)));
+  assert.equal(written.every((event) => event.principal_id === "agent:agent-a"
+    && event.cause_event_ids[0] === "daimon:evt-record"), true);
+  await causalStore.finalizeStream(causal[0].run_id, "memory:agent-a");
+  assert.match(new TextDecoder().decode(await causalStore.exportStream(causal[0].run_id, "memory:agent-a")), /"final_seq":3/);
+});
+
+test("recordTurn rejects a principal outside its configured bank before either ledger mutates", async () => {
+  const root = await tempDir();
+  const runtime = createMemoryRuntime({ agentId: "agent-a", runtimeHomePath: root });
+  const principal = { agentId: "agent-b", scope: "global" as const };
+  await assert.rejects(() => runtime.recordTurn({
+    principal,
+    prompt: { principal, sections: [], rawHint: "none" },
+    request: { eventId: "daimon:wrong-bank-turn", kind: "manual", text: "wrong bank", context: {} },
+    result: "completed",
+    outputText: "must not persist",
+    toolEvents: []
+  }), /does not own this runtime bank/);
+  assert.deepEqual(await new JsonlMemoryStore(root).read(), []);
+  assert.deepEqual(await new CausalEventStore(root).read(), []);
 });
 
 test("marks failed turns and still records denied decision", async () => {
@@ -152,7 +187,7 @@ test("marks failed turns and still records denied decision", async () => {
       rawHint: "failed"
     },
     request: {
-      eventId: "evt-fail",
+      eventId: "daimon:evt-fail",
       kind: "schedule",
       text: "run",
       from: "operator",
@@ -195,7 +230,7 @@ test("prepareTurn uses semantic retrieval when lexical overlap is absent", async
       rawHint: "seed"
     },
     request: {
-      eventId: "evt-semantics",
+      eventId: "daimon:evt-semantics",
       kind: "manual",
       text: "alpha-drive-marker",
       context: { networkId: "noopolis", roomId: "agora" }
@@ -221,7 +256,7 @@ test("prepareTurn uses semantic retrieval when lexical overlap is absent", async
       rawHint: "seed"
     },
     request: {
-      eventId: "evt-noise",
+      eventId: "daimon:evt-noise",
       kind: "manual",
       text: "ops-marker",
       context: { networkId: "noopolis", roomId: "ops" }
@@ -232,7 +267,7 @@ test("prepareTurn uses semantic retrieval when lexical overlap is absent", async
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "evt-search",
+    eventId: "daimon:evt-search",
     kind: "message",
     from: "mapper",
     text: "vehicle-query",
@@ -271,7 +306,7 @@ test("kernel search uses embeddings with scope filtering", async () => {
       rawHint: "seed"
     },
     request: {
-      eventId: "evt-kernel-match",
+      eventId: "daimon:evt-kernel-match",
       kind: "manual",
       text: "alpha-drive-marker",
       context: { networkId: "noopolis", roomId: "agora" }
@@ -297,7 +332,7 @@ test("kernel search uses embeddings with scope filtering", async () => {
       rawHint: "seed"
     },
     request: {
-      eventId: "evt-kernel-noise",
+      eventId: "daimon:evt-kernel-noise",
       kind: "manual",
       text: "beta-noise-marker",
       context: { networkId: "noopolis", roomId: "ops" }
@@ -314,7 +349,7 @@ test("kernel search uses embeddings with scope filtering", async () => {
   };
 
   const scope = memoryScopeId(requester);
-  const result = await runtime.kernel.search(memoryToolCall(requester, {
+  const result = await runtime.kernel.search(memoryToolCall(runtime, requester, {
     scope,
     query: "vehicle-query",
     limit: 5
@@ -346,7 +381,7 @@ test("kernel search returns matching events by requested scope", async () => {
       rawHint: "seed"
     },
     request: {
-      eventId: "evt-source",
+      eventId: "daimon:evt-source",
       kind: "manual",
       text: "I updated the roadmap.",
       context: {
@@ -364,20 +399,15 @@ test("kernel search returns matching events by requested scope", async () => {
     scope: "pair" as const,
     qualifier: "mapper"
   };
-  const result = await runtime.kernel.search(memoryToolCall(requester, {
+  const result = await runtime.kernel.search(memoryToolCall(runtime, requester, {
     scope: "all",
     query: "roadmap",
     limit: 2
   }));
 
   assert.equal(result.tool, "memory.search");
-  assert.ok(result.content.length >= 1);
-  assert.ok(result.content.some((entry) => entry.text?.includes("roadmap")));
-  assert.ok(result.audit.sources.some((source) =>
-    source.agentId === "agent-a" &&
-    source.scope === "room" &&
-    source.qualifier === "noopolis:agora"
-  ));
+  assert.equal(result.decision, "deny");
+  assert.equal(result.content.length, 0);
 });
 
 test("prepareTurn emits a schema-valid memory.recalled causal event per selected memory", async () => {
@@ -405,7 +435,7 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
         rawHint: "seed"
       },
       request: {
-        eventId: "evt-causal-source",
+        eventId: "daimon:evt-causal-source",
         kind: "manual",
         text: "I updated the roadmap.",
         context: { networkId: "noopolis", roomId: "agora" }
@@ -419,7 +449,7 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
     const sourceEvents = await sourceStore.read({ principalAgentId: "agent-a" });
 
     const turn = await runtime.prepareTurn({
-      eventId: "evt-wake-causal",
+      eventId: "daimon:evt-wake-causal",
       kind: "message",
       from: "mapper",
       text: "roadmap",
@@ -447,7 +477,7 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
 
     for (const event of recalledEvents) {
       assert.equal(validateMemoryRecalledCausalEvent(event), true);
-      assert.deepEqual(event.cause_event_ids, ["evt-wake-causal"]);
+      assert.deepEqual(event.cause_event_ids, ["daimon:evt-wake-causal"]);
       assert.equal(event.run_id, "test-run-b90");
       assert.equal(event.principal_id, "agent:agent-a");
       assert.equal(event.emitter.system, "mneme");
@@ -490,7 +520,7 @@ test("prepareTurn stamps a contiguous seq per (run_id, stream_id) across repeate
       principal,
       prompt: { principal, sections: [], rawHint: "seed" },
       request: {
-        eventId: "evt-seq-source",
+        eventId: "daimon:evt-seq-source",
         kind: "manual",
         text: "roadmap milestone alpha",
         context: { networkId: "noopolis", roomId: "agora" }
@@ -501,14 +531,14 @@ test("prepareTurn stamps a contiguous seq per (run_id, stream_id) across repeate
     });
 
     await runtime.prepareTurn({
-      eventId: "evt-seq-wake-1",
+      eventId: "daimon:evt-seq-wake-1",
       kind: "message",
       from: "mapper",
       text: "roadmap",
       context: { networkId: "noopolis", roomId: "agora" }
     });
     await runtime.prepareTurn({
-      eventId: "evt-seq-wake-2",
+      eventId: "daimon:evt-seq-wake-2",
       kind: "message",
       from: "mapper",
       text: "roadmap",
@@ -536,17 +566,15 @@ test("prepareTurn stamps a contiguous seq per (run_id, stream_id) across repeate
 // B70: recall-mode ablation knob (recallMode.ts) + the memory_id root fix.
 
 const registerToolCall = (
+  runtime: MemoryRuntime,
   principal: MemoryPrincipalRef,
   args: Record<string, unknown>,
   requestId: string
-): MemoryToolCall => ({
-  request_id: requestId,
-  tool: "memory.register",
-  arguments: args,
-  envelope: {
+): MemoryToolCall => {
+  const envelope = {
     version: "mneme.memory.tool.v1",
     mode: "awake",
-    wake_id: "runtime-test-register",
+    wake_id: "daimon:runtime-test-register",
     thread_id: "runtime-test-register-thread",
     principal,
     conversation_scope: principal.qualifier ?? principal.scope,
@@ -554,11 +582,13 @@ const registerToolCall = (
     policy_version: "test",
     allowed_scope_aliases: ["all", "current", "global"],
     transport: "in_process",
-    nonce: "runtime-test-register",
+    nonce: requestId,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     capability: "memory"
-  }
-});
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  return { request_id: requestId, tool: "memory.register", arguments: args, envelope: { ...envelope, authority: runtime.authority.issue({ request_id: requestId, tool: "memory.register", arguments: args, envelope }) } };
+};
 
 test("B70: memory.recalled stamps memory_id as the chain root, not the revision id", async () => {
   const root = await tempDir();
@@ -569,7 +599,7 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
     const runtime = createMemoryRuntime({ agentId: "agent-a", runtimeHomePath: root, tokenBudget: 600 });
     const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
 
-    const first = await runtime.kernel.register(registerToolCall(principal, {
+    const first = await runtime.kernel.register(registerToolCall(runtime, principal, {
       scope: "current",
       kind: "text",
       content: { kind: "text", text: "roadmap v1" },
@@ -580,7 +610,7 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
     }, "reg-b70-1"));
     const rootId = first.content[0].event_ids[0];
 
-    const second = await runtime.kernel.register(registerToolCall(principal, {
+    const second = await runtime.kernel.register(registerToolCall(runtime, principal, {
       scope: "current",
       kind: "text",
       content: { kind: "text", text: "roadmap v2 (revised)" },
@@ -594,7 +624,7 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
     assert.notEqual(headId, rootId);
 
     const turn = await runtime.prepareTurn({
-      eventId: "evt-b70-wake",
+      eventId: "daimon:evt-b70-wake",
       kind: "message",
       from: "mapper",
       text: "roadmap",
@@ -647,7 +677,7 @@ test("B70: off mode never reads memory, stamps zero memory.recalled, and gates k
     }]);
 
     const turn = await runtime.prepareTurn({
-      eventId: "evt-b70-off-wake",
+      eventId: "daimon:evt-b70-off-wake",
       kind: "message",
       from: "mapper",
       text: "canary",
@@ -667,15 +697,15 @@ test("B70: off mode never reads memory, stamps zero memory.recalled, and gates k
     assert.equal(modeStamps[0].payload.injected_count, 0);
     assert.equal(modeStamps[0].payload.degenerate, false);
 
-    const searchResult = await runtime.kernel.search(memoryToolCall(principal, {
+    const searchResult = await runtime.kernel.search(memoryToolCall(runtime, principal, {
       scope: "all",
       query: "canary",
       limit: 5
     }));
     assert.equal(searchResult.content.length, 0);
-    assert.equal(searchResult.audit.argument_hash, "recall_mode=off");
+    assert.match(searchResult.audit.argument_hash ?? "", /^[0-9a-f]{64}$/);
 
-    const locateResult = await runtime.kernel.locate(memoryToolCall(principal, {
+    const locateResult = await runtime.kernel.locate(memoryToolCall(runtime, principal, {
       query: "canary",
       limit: 5
     }));
@@ -738,7 +768,7 @@ test("B70: shuffled mode injects the other-scope decoy, never the on-mode select
     });
 
     const turn = await runtime.prepareTurn({
-      eventId: "evt-b70-shuffled-wake",
+      eventId: "daimon:evt-b70-shuffled-wake",
       kind: "message",
       from: "mapper",
       text: "canary-shuffled-plasma",
@@ -798,7 +828,7 @@ test("B70: shuffled mode is degenerate and injects nothing when there is no comp
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "evt-b70-shuffled-degenerate",
+    eventId: "daimon:evt-b70-shuffled-degenerate",
     kind: "message",
     from: "mapper",
     text: "only-candidate",
@@ -826,7 +856,7 @@ for (const recallMode of ["on", "off", "shuffled"] as const) {
     const principal: MemoryPrincipalRef = { agentId: "agent-a", scope: "global" };
 
     const registerCall: MemoryToolCall = {
-      ...memoryToolCall(principal, {
+      ...memoryToolCall(runtime, principal, {
         scope: memoryScopeId(principal),
         kind: "text",
         content: { kind: "text", text: `write under recall mode ${recallMode}` },
@@ -834,8 +864,7 @@ for (const recallMode of ["on", "off", "shuffled"] as const) {
         sensitivity: "normal",
         evidence_event_ids: ["evt_external"],
         source_type: "test"
-      }),
-      tool: "memory.register"
+      }, "memory.register")
     };
 
     const result = await runtime.kernel.register(registerCall);
@@ -849,7 +878,7 @@ for (const recallMode of ["on", "off", "shuffled"] as const) {
     const written = causalEvents.filter((event) => event.type === "memory.written");
     assert.equal(written.length, 1);
     assert.ok(validateMemoryWrittenCausalEvent(written[0]));
-    assert.equal(written[0].cause_event_ids[0], "runtime-test-wake");
+    assert.equal(written[0].cause_event_ids[0], "daimon:runtime-test-wake");
   });
 }
 

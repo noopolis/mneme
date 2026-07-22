@@ -7,8 +7,10 @@ import test from "node:test";
 import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import {
   createMemoryToolDescriptors,
+  createMemoryToolEnvelope,
   getAwakeMemoryToolInstructions,
   getDreamMemoryToolInstructions,
   MEMORY_TOOLS_DREAM_SAFE,
@@ -53,11 +55,12 @@ test("tool descriptors expose provider-safe model names and execute through the 
   assert.equal(search.description, getAwakeMemoryToolInstructions()["memory.search"].description);
 
   const context: MemoryToolExecutionContext = {
-    wakeId: "wake-1",
+    wakeId: "daimon:wake-1",
     threadId: "noopolis:agora",
     principal,
     conversationScope: memoryScopeId(principal),
-    audienceKey: "agora"
+    audienceKey: "agora",
+    authority: runtime.authority
   };
   const result = await search.invoke({ scope: "current", query: "DESCRIPTOR_MARKER" }, context);
 
@@ -136,9 +139,31 @@ test("tool envelopes preserve awake and dream modes", async () => {
     threadId: "dream:wake-dream-abc123",
     principal: { agentId: "luna", scope: "global" },
     conversationScope: "global",
-    audienceKey: "luna"
+    audienceKey: "luna",
+    authority: createMemoryAuthorityHandoff({
+      secret: "descriptor-capture",
+      bankId: "luna",
+      runtimeId: "descriptor-test-runtime"
+    })
   });
 
   assert.equal(captured?.envelope.mode, "dream");
   assert.equal(captured?.envelope.thread_id, "dream:wake-dream-abc123");
+});
+
+test("B45 execution contexts lower only finite current/global scope grants", () => {
+  const principal = { agentId: "luna", scope: "room" as const, qualifier: "noopolis:agora" };
+  const base: MemoryToolExecutionContext = {
+    wakeId: "daimon:wake-scopes",
+    threadId: "thread-scopes",
+    principal,
+    conversationScope: memoryScopeId(principal)
+  };
+  const current = memoryScopeId(principal);
+  const global = memoryScopeId({ agentId: principal.agentId, scope: "global" });
+  const envelope = createMemoryToolEnvelope({ ...base, allowedScopes: [current, global, current] });
+  assert.deepEqual(envelope.allowed_scopes, [current, global]);
+  assert.equal(envelope.allowed_scope_aliases.includes("all"), false);
+  assert.throws(() => createMemoryToolEnvelope({ ...base, allowedScopes: ["all"] }), /unrestricted scope/);
+  assert.throws(() => createMemoryToolEnvelope({ ...base, allowedScopeAliases: ["all"] }), /unrestricted all alias/);
 });

@@ -20,12 +20,6 @@ const memoryContentSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("relationship"), from: z.string(), relation: z.string(), to: z.string() })
 ]);
 
-const principalSchema = z.object({
-  agentId: z.string(),
-  scope: z.enum(["global", "team", "room", "pair", "task", "role", "artifact"]),
-  qualifier: z.string().optional()
-});
-
 export const registerInputSchema = {
   scope: z.string().describe("Scope alias or canonical scope id where the memory belongs."),
   kind: z.string().describe("Memory content kind."),
@@ -35,7 +29,6 @@ export const registerInputSchema = {
   evidence_event_ids: z.array(z.string()).min(1).describe("Event ids that justify the memory."),
   source_type: z.string().describe("Source label for the registered memory."),
   confidence: z.number().optional().describe("Confidence from 0 to 1."),
-  principal: principalSchema.optional().describe("Optional principal override for the stored memory."),
   memory_id: z.string().optional().describe("When set, register this as a new revision of an existing memory chain.")
 };
 
@@ -46,7 +39,7 @@ export const summarizeInputSchema = {
 
 export const forgetInputSchema = {
   scope: z.string().describe("Scope alias or canonical scope id for the tombstone."),
-  event_ids: z.array(z.string()).min(1).describe("Memory event ids to tombstone."),
+  event_ids: z.array(z.string()).min(1).max(256).describe("Memory event ids to tombstone."),
   reason: z.string().optional().describe("Why these memories should be forgotten.")
 };
 

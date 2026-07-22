@@ -4,76 +4,46 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { validateMnemeMemoryExport } from "../contract/memoryExport.js";
-import { JsonlMemoryStore } from "../store/store.js";
-import { memoryExportFilePath } from "../store/memoryExport.js";
-import { parseMnemeExportArgs, runMnemeExportCommand } from "./export.js";
+import { CausalEventStore } from "../store/causalStore.js";
+import { causalEvidenceExportFilePath } from "../store/memoryExport.js";
+import { parseMnemeExportArgs, runMnemeExportCommand, runMnemeSealCommand } from "./export.js";
 
-const tempRoots: string[] = [];
+const roots: string[] = [];
+const temp = async (): Promise<string> => { const value = await mkdtemp(path.join(os.tmpdir(), "mneme-cli-evidence-")); roots.push(value); return value; };
+test.afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-const tempDir = async (): Promise<string> => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-mneme-cli-export-"));
-  tempRoots.push(directory);
-  return directory;
-};
-
-test.afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+test("mneme export parses only an evidence stream selector", () => {
+  assert.deepEqual(parseMnemeExportArgs(["--runtime-home", "/tmp/a", "--agent-id", "agent-a", "--run-id", "run-a"], {}), { runtimeHomePath: "/tmp/a", agentId: "agent-a", runId: "run-a" });
+  assert.deepEqual(parseMnemeExportArgs(["--runtime-home", "/tmp/a", "--agent-id", "agent-a"], { NOOPOLIS_RUN_ID: " run-env " }), { runtimeHomePath: "/tmp/a", agentId: "agent-a", runId: "run-env" });
+  assert.throws(() => parseMnemeExportArgs(["--agent-id", "agent-a"], {}), /runtime-home/);
+  assert.throws(() => parseMnemeExportArgs(["--runtime-home", "/tmp/a", "--agent-id", "agent-a"], {}), /run-id or NOOPOLIS_RUN_ID/);
 });
 
-test("parseMnemeExportArgs reads --runtime-home/--agent-id and optional --exported-at", () => {
-  const args = parseMnemeExportArgs(["--runtime-home", "/tmp/foo", "--agent-id", "agent-a", "--exported-at", "2026-07-11T00:00:00.000Z"], {});
-  assert.deepEqual(args, {
-    runtimeHomePath: "/tmp/foo",
-    bankId: "agent-a",
-    exportedAt: "2026-07-11T00:00:00.000Z"
-  });
+test("mneme export writes finalized evidence, never raw memory content", async () => {
+  const root = await temp(); const store = new CausalEventStore(root);
+  await store.append({ runId: "run-a", streamId: "memory:agent-a", type: "memory.tool.outcome", principalId: "agent:agent-a", causeEventIds: ["daimon:wake"], payload: { argument_sha256: "a".repeat(64), authority_sha256: "c".repeat(64), tool: "memory.search", decision: "deny", request_sha256: "b".repeat(64) } });
+  const sealed = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
+  assert.equal(sealed, causalEvidenceExportFilePath(root));
+  const firstBytes = await readFile(sealed, "utf8");
+  // Simulate a crash after the durable final but before/after publishing the
+  // export file. The exact retry must recreate the same selected bytes.
+  await rm(sealed);
+  const retried = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
+  assert.equal(retried, sealed);
+  assert.equal(await readFile(retried, "utf8"), firstBytes);
+  const written = await runMnemeExportCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
+  assert.equal(written, causalEvidenceExportFilePath(root));
+  assert.equal((await readFile(written, "utf8")).includes("content"), false);
 });
 
-test("parseMnemeExportArgs falls back to MNEME_RUNTIME_HOME / MNEME_AGENT_ID env vars", () => {
-  const args = parseMnemeExportArgs([], {
-    MNEME_RUNTIME_HOME: "/tmp/env-home",
-    MNEME_AGENT_ID: "agent-env"
-  } as NodeJS.ProcessEnv);
-  assert.equal(args.runtimeHomePath, "/tmp/env-home");
-  assert.equal(args.bankId, "agent-env");
-  assert.equal(args.exportedAt, undefined);
+test("mneme seal uses the injected CLI environment run id", async () => {
+  const root = await temp();
+  const written = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a"], { NOOPOLIS_RUN_ID: "run-from-env" });
+  assert.match(await readFile(written, "utf8"), /"run_id":"run-from-env"/);
 });
 
-test("parseMnemeExportArgs throws without a runtime home", () => {
-  assert.throws(() => parseMnemeExportArgs(["--agent-id", "agent-a"], {}), /--runtime-home/);
-});
-
-test("parseMnemeExportArgs throws without an agent id", () => {
-  assert.throws(() => parseMnemeExportArgs(["--runtime-home", "/tmp/foo"], {}), /--agent-id/);
-});
-
-test("runMnemeExportCommand writes a valid mneme.memory-export.v1 document that re-parses", async () => {
-  const root = await tempDir();
-  const store = new JsonlMemoryStore(root);
-  await store.append({
-    type: "memory.observed",
-    principal: { agentId: "agent-cli", scope: "global" },
-    scope: "scope-a",
-    visibility: "global",
-    source: "cli-export-test",
-    content: { kind: "text", text: "from the cli" },
-    tags: [],
-    entities: [],
-    sensitivity: "normal",
-    parentEventIds: []
-  });
-
-  const writtenPath = await runMnemeExportCommand(
-    ["--runtime-home", root, "--agent-id", "agent-cli", "--exported-at", "2026-07-11T00:00:00.000Z"],
-    {} as NodeJS.ProcessEnv
-  );
-
-  assert.equal(writtenPath, memoryExportFilePath(root));
-  const parsed = JSON.parse(await readFile(writtenPath, "utf8"));
-  const result = validateMnemeMemoryExport(parsed);
-  assert.equal(result.success, true);
-  assert.equal(parsed.bank_id, "agent-cli");
-  assert.equal(parsed.exported_at, "2026-07-11T00:00:00.000Z");
-  assert.equal(parsed.memories.length, 1);
+test("mneme seal emits an explicit empty stream final", async () => {
+  const root = await temp();
+  const written = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-empty"], {});
+  assert.match(await readFile(written, "utf8"), /"final_seq":0/);
 });

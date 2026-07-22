@@ -37,9 +37,9 @@ test("own global-variant scope is derivable only when the envelope grants the gl
   assert.equal(notGranted.ok, false);
 });
 
-test("literal 'all' is derivable only when the envelope grants the all alias", () => {
+test("literal 'all' is never a normal write grant", () => {
   const granted = assertWriteScope(alice, aliasesAll, "all", AWAKE_CAPABILITY);
-  assert.equal(granted.ok, true);
+  assert.equal(granted.ok, false);
 
   const notGranted = assertWriteScope(alice, aliasesCurrentOnly, "all", AWAKE_CAPABILITY);
   assert.equal(notGranted.ok, false);

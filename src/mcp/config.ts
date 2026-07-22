@@ -1,11 +1,12 @@
 import { memoryScopeId } from "../identity/ids.js";
+import { randomUUID } from "node:crypto";
 import type {
   MemoryPrincipalRef,
   MemoryRuntime,
   MemoryToolExecutionContext,
   MemoryWakeMode
 } from "../contract/types.js";
-import { createMemoryRuntime } from "../runtime/runtime.js";
+import { createMemoryRuntime, memoryAuthorityRuntimeId } from "../runtime/runtime.js";
 import { createOllamaEmbeddingProvider, type MemoryEmbeddingProvider } from "../store/embedding.js";
 
 export interface MnemeMcpEmbeddingConfig {
@@ -24,6 +25,7 @@ export interface MnemeMcpServerConfig {
   agentQualifier?: string;
   conversationScope?: string;
   audienceKey?: string;
+  allowedScopes?: string[];
   policyVersion?: string;
   source?: string;
   tokenBudget?: number;
@@ -38,6 +40,8 @@ export interface ResolvedMnemeMcpConfig extends Required<
   source?: string;
   tokenBudget?: number;
   runtime: MemoryRuntime;
+  authority: NonNullable<MemoryRuntime["authority"]>;
+  allowedScopes: string[];
   mode: MemoryWakeMode;
 }
 
@@ -67,6 +71,24 @@ export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMne
     qualifier: config.agentQualifier
   };
 
+  const runtime = config.runtime ?? createMemoryRuntime({
+    agentId: config.agentId,
+    embeddingProvider: createEmbeddingProvider(config.embedding),
+    runtimeHomePath: config.runtimeHomePath,
+    source: config.source,
+    tokenBudget: config.tokenBudget
+  });
+  if (!runtime.authority) throw new Error("Mneme MCP runtime has no trusted authority handoff");
+  if (runtime.authority.bankId !== config.agentId || runtime.authority.runtimeId !== memoryAuthorityRuntimeId(config.runtimeHomePath)) {
+    throw new Error("Mneme MCP runtime authority does not match its bank/runtime configuration");
+  }
+  const allowedScopes = [...new Set((config.allowedScopes ?? [
+    memoryScopeId(principal),
+    memoryScopeId({ agentId: principal.agentId, scope: "global" })
+  ]).map((scope) => scope.trim()))];
+  if (allowedScopes.length === 0 || allowedScopes.length > 32 || allowedScopes.some((scope) => !scope || scope.toLowerCase() === "all" || scope.length > 512 || /[\u0000-\u001f\u007f]/u.test(scope))) {
+    throw new Error("Mneme MCP requires a bounded finite allowed-scope set");
+  }
   return {
     runtimeHomePath: config.runtimeHomePath,
     agentId: config.agentId,
@@ -75,15 +97,11 @@ export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMne
     conversationScope: config.conversationScope ?? memoryScopeId(principal),
     audienceKey: config.audienceKey ?? config.agentId,
     policyVersion: config.policyVersion ?? "memory-policy.v1",
+    allowedScopes,
     source: config.source,
     tokenBudget: config.tokenBudget,
-    runtime: config.runtime ?? createMemoryRuntime({
-      agentId: config.agentId,
-      embeddingProvider: createEmbeddingProvider(config.embedding),
-      runtimeHomePath: config.runtimeHomePath,
-      source: config.source,
-      tokenBudget: config.tokenBudget
-    })
+    runtime,
+    authority: runtime.authority
   };
 };
 
@@ -92,16 +110,22 @@ export const createMcpToolContext = (
   toolName: string
 ): MemoryToolExecutionContext => {
   const now = Date.now();
+  const requestId = randomUUID();
   return {
     mode: config.mode,
-    wakeId: `mcp-${now}`,
+    // MCP has no upstream causal parent unless the trusted deployment adapter
+    // supplies one.  This is a Mneme-owned request fact, not wall-clock text.
+    wakeId: `mneme:mcp-request-${requestId}`,
     threadId: `mcp:${config.audienceKey}`,
     principal: config.principal,
     conversationScope: config.conversationScope,
     audienceKey: config.audienceKey,
     policyVersion: config.policyVersion,
+    allowedScopes: config.allowedScopes,
     transport: "mcp",
-    nonce: `mcp:${toolName}:${now}`
+    nonce: `mcp:${toolName}:${requestId}`,
+    expiresAt: new Date(now + 5 * 60_000).toISOString(),
+    authority: config.authority
   };
 };
 
@@ -145,6 +169,7 @@ export const parseMnemeMcpArgs = (
   const embeddingTimeoutText = values.get("embedding-timeout-ms") ?? env.MNEME_EMBEDDING_TIMEOUT_MS;
   const embeddingDimensions = embeddingDimensionsText ? Number.parseInt(embeddingDimensionsText, 10) : undefined;
   const embeddingTimeoutMs = embeddingTimeoutText ? Number.parseInt(embeddingTimeoutText, 10) : undefined;
+  const allowedScopesText = values.get("allowed-scopes") ?? env.MNEME_ALLOWED_SCOPES;
 
   return {
     runtimeHomePath,
@@ -154,6 +179,7 @@ export const parseMnemeMcpArgs = (
     agentQualifier: values.get("agent-qualifier") ?? env.MNEME_AGENT_QUALIFIER,
     conversationScope: values.get("conversation-scope") ?? env.MNEME_CONVERSATION_SCOPE,
     audienceKey: values.get("audience-key") ?? env.MNEME_AUDIENCE_KEY,
+    allowedScopes: allowedScopesText?.split(",").map((scope) => scope.trim()).filter(Boolean),
     policyVersion: values.get("policy-version") ?? env.MNEME_POLICY_VERSION,
     source: values.get("source") ?? env.MNEME_SOURCE,
     tokenBudget: Number.isFinite(tokenBudget) ? tokenBudget : undefined,

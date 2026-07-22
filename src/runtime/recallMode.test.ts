@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import { hashCanonicalJson } from "../contract/causal.js";
+import { createMemoryAuthorityHandoff } from "../policy/authority.js";
+import { CausalEventStore } from "../store/causalStore.js";
 import {
   guardKernelForRecallMode,
   MNEME_RECALL_MODE_ENV,
@@ -185,7 +191,7 @@ test("guardKernelForRecallMode returns well-formed empty search/locate results i
   assert.equal(searchResult.tool, "memory.search");
   assert.equal(searchResult.decision, "deny");
   assert.deepEqual(searchResult.content, []);
-  assert.equal(searchResult.audit.argument_hash, "recall_mode=off");
+  assert.match(searchResult.audit.argument_hash ?? "", /^[0-9a-f]{64}$/);
 
   const locateResult = await guarded.locate(toolCall("memory.locate"));
   assert.equal(locateResult.tool, "memory.locate");
@@ -193,6 +199,69 @@ test("guardKernelForRecallMode returns well-formed empty search/locate results i
   assert.deepEqual(locateResult.content, []);
 
   assert.deepEqual(calls, []);
+});
+
+test("B45 recall-mode guard executes and records only its immutable signed call snapshot", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mneme-recall-mode-authority-"));
+  try {
+    const authority = {
+      secret: "recall mode authority secret",
+      bankId: "agent-a",
+      runtimeId: "recall-mode-runtime"
+    };
+    const handoff = createMemoryAuthorityHandoff(authority);
+    const args = { scope: "current", query: "ORIGINAL_QUERY" };
+    const allowedScopes = ["agent:agent-a/scope:room/qualifier:org:room-a"];
+    const unsigned: Omit<MemoryToolCallEnvelope, "authority"> = {
+      version: "mneme.memory.tool.v1",
+      mode: "awake",
+      wake_id: "daimon:recall-mode-snapshot",
+      thread_id: "thread-recall-mode-snapshot",
+      principal: { agentId: "agent-a", scope: "room", qualifier: "org:room-a" },
+      conversation_scope: "org:room-a",
+      audience_key: "recall-mode-snapshot",
+      policy_version: "test",
+      allowed_scope_aliases: ["current"],
+      allowed_scopes: allowedScopes,
+      transport: "in_process",
+      nonce: "recall-mode-snapshot",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      capability: "memory"
+    };
+    const base = {
+      request_id: "req:recall-mode-snapshot",
+      tool: "memory.search" as const,
+      arguments: args,
+      envelope: unsigned
+    };
+    const call: MemoryToolCall = {
+      ...base,
+      envelope: { ...unsigned, authority: handoff.issue(base) }
+    };
+    const causalStore = new CausalEventStore(root);
+    const guarded = guardKernelForRecallMode(makeCountingKernel().kernel, "off", {
+      runtimeHomePath: root,
+      authority,
+      causalStore
+    });
+    const expectedArgumentHash = hashCanonicalJson(args);
+
+    const pending = guarded.search(call);
+    args.query = "SUBSTITUTED_QUERY";
+    call.envelope.principal.agentId = "attacker";
+    allowedScopes[0] = "agent:attacker/scope:global";
+    call.envelope.mode = "dream";
+
+    const result = await pending;
+    assert.equal(result.decision, "deny");
+    assert.equal(result.audit.requester.agentId, "agent-a");
+    assert.equal(result.audit.argument_hash, expectedArgumentHash);
+    const outcome = (await causalStore.read()).find((event) => event.type === "memory.tool.outcome");
+    assert.equal(outcome?.principal_id, "agent:agent-a");
+    assert.equal(outcome?.payload.argument_sha256, expectedArgumentHash);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("guardKernelForRecallMode keeps mutating tools live in off and shuffled mode", async () => {

@@ -18,7 +18,7 @@ const goldenMemoryRecalled = (): MemoryRecalledCausalEvent => ({
   event_id: mnemeCausalEventId("evt-1"),
   emitter: { system: "mneme", stream_id: memoryStreamId("agent-a"), seq: 1 },
   type: "memory.recalled",
-  principal_id: "agent-a",
+  principal_id: "agent:agent-a",
   recorded_at: new Date().toISOString(),
   cause_event_ids: ["daimon:wake-1"],
   payload: {

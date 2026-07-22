@@ -1,4 +1,8 @@
 import * as z from "zod/v4";
+import { createHash } from "node:crypto";
+import { canonicalJsonBytes, canonicalJsonStringify, parseCanonicalJson, parseCanonicalJsonBytes } from "./canonicalJson.js";
+
+export { canonicalJsonBytes, canonicalJsonStringify, parseCanonicalJson, parseCanonicalJsonBytes } from "./canonicalJson.js";
 
 /**
  * Mneme's own native copy of the `noopolis.causal-event.v1` wire envelope.
@@ -77,7 +81,7 @@ const causalEventEmitterSchema = z
   .object({
     system: z.enum(CAUSAL_EVENT_SYSTEMS),
     stream_id: z.string().min(1),
-    seq: z.number().int().min(1)
+    seq: z.number().int().min(1).refine(Number.isSafeInteger, "seq must be a safe integer")
   })
   .strict();
 
@@ -85,30 +89,35 @@ export const causalEventSchema = z
   .object({
     version: z.literal(CAUSAL_EVENT_VERSION),
     run_id: z.string().min(1),
-    event_id: z.string().regex(/^[^:]+:.+$/, "event_id must be <system>:<local>"),
+    event_id: z.string().regex(/^(simfile|moltnet|mneme|daimon):.+$/, "event_id must be <system>:<local>"),
     emitter: causalEventEmitterSchema,
     type: z.string().min(1),
-    principal_id: z.string().min(1),
-    recorded_at: z.string().min(1),
-    cause_event_ids: z.array(z.string().min(1)),
+    principal_id: z.string().regex(/^(agent|operator|system):.+$/, "principal_id must be authenticated"),
+    recorded_at: z.string().regex(/^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d+)?(?:Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/, "recorded_at must be RFC3339"),
+    cause_event_ids: z.array(z.string().regex(/^(simfile|moltnet|mneme|daimon):.+$/)),
     payload: z.record(z.string(), z.unknown())
   })
   .strict()
   .superRefine((value, context) => {
-    if (Number.isNaN(Date.parse(value.recorded_at))) {
-      context.addIssue({
-        code: "custom",
-        message: "recorded_at must be a valid ISO 8601 timestamp",
-        path: ["recorded_at"]
-      });
-    }
-
     if (!value.event_id.startsWith(`${value.emitter.system}:`)) {
       context.addIssue({
         code: "custom",
         message: "event_id system prefix must match emitter.system",
         path: ["event_id"]
       });
+    }
+    if (new Set(value.cause_event_ids).size !== value.cause_event_ids.length) {
+      context.addIssue({ code: "custom", message: "cause_event_ids must be unique", path: ["cause_event_ids"] });
+    }
+    const match = /^(\d{4})-(\d{2})-(\d{2})T/.exec(value.recorded_at);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const days = month === 2
+        ? ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28)
+        : ([4, 6, 9, 11].includes(month) ? 30 : 31);
+      if (day > days) context.addIssue({ code: "custom", message: "recorded_at must be a real calendar date", path: ["recorded_at"] });
     }
   });
 
@@ -143,6 +152,51 @@ export const parseCausalEvent = (value: unknown): CausalEvent => {
   }
 
   return result.data as CausalEvent;
+};
+
+export const hashCausalEvent = (event: CausalEvent): string =>
+  createHash("sha256").update(canonicalJsonBytes(parseCausalEvent(event))).digest("hex");
+
+export const hashCanonicalJson = (value: unknown): string =>
+  createHash("sha256").update(canonicalJsonBytes(value)).digest("hex");
+
+export const CAUSAL_STREAM_FINAL_VERSION = "noopolis.causal-stream-final.v1" as const;
+export interface CausalStreamFinal {
+  version: typeof CAUSAL_STREAM_FINAL_VERSION;
+  run_id: string;
+  emitter: { system: CausalEventSystem; stream_id: string };
+  final_seq: number;
+}
+export const causalStreamFinalSchema = z.object({
+  version: z.literal(CAUSAL_STREAM_FINAL_VERSION), run_id: z.string().min(1),
+  emitter: z.object({ system: z.enum(CAUSAL_EVENT_SYSTEMS), stream_id: z.string().min(1) }).strict(),
+  final_seq: z.number().int().min(0).refine(Number.isSafeInteger, "final_seq must be a safe integer")
+}).strict();
+export const parseCausalStreamFinal = (value: unknown): CausalStreamFinal => {
+  const result = causalStreamFinalSchema.safeParse(value);
+  if (!result.success) throw new Error(`invalid stream final: ${result.error.issues.map((issue) => issue.message).join("; ")}`);
+  return result.data;
+};
+export const validateCausalStreamFinal = (value: unknown) => causalStreamFinalSchema.safeParse(value);
+
+/** Strict B41 preflight for Mneme's exported JSONL stream. */
+export const parseCompleteCausalStream = (bytes: Uint8Array, runId: string, streamId: string): { events: CausalEvent[]; final: CausalStreamFinal } => {
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  if (text.startsWith("\ufeff") || !text.endsWith("\n")) throw new Error("stream must have exactly one terminal LF and no BOM");
+  const lines = text.slice(0, -1).split("\n");
+  if (!lines.length || lines.some((line) => !line)) throw new Error("stream contains an empty record");
+  const records = lines.map((line) => parseCanonicalJson(line));
+  const final = parseCausalStreamFinal(records.at(-1));
+  if (final.run_id !== runId || final.emitter.system !== MNEME_CAUSAL_SYSTEM || final.emitter.stream_id !== streamId) throw new Error("wrong stream final");
+  const events = records.slice(0, -1).map(parseCausalEvent);
+  if (events.length !== final.final_seq) throw new Error("stream final is incomplete");
+  const ids = new Set<string>();
+  events.forEach((event, index) => {
+    if (event.run_id !== runId || event.emitter.system !== MNEME_CAUSAL_SYSTEM || event.emitter.stream_id !== streamId || event.emitter.seq !== index + 1) throw new Error("stream event is not contiguous");
+    if (ids.has(event.event_id)) throw new Error("duplicate event id");
+    ids.add(event.event_id);
+  });
+  return { events, final };
 };
 
 /**
