@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
+import { types as utilTypes } from "node:util";
 
 import { canonicalJsonStringify, hashCanonicalJson, parseCanonicalJson } from "../contract/causal.js";
 import type { MemoryToolCall, MemoryToolCallEnvelope } from "../contract/types.js";
@@ -24,13 +25,6 @@ export interface MemoryAuthorityConfig {
   readonly runtimeId: string;
 }
 
-const canonicalEnvelope = <T extends Omit<MemoryToolCallEnvelope, "authority"> | MemoryToolCallEnvelope>(envelope: T): T => {
-  const principal = envelope.principal.qualifier === undefined
-    ? { agentId: envelope.principal.agentId, scope: envelope.principal.scope }
-    : envelope.principal;
-  return { ...envelope, principal } as T;
-};
-
 const authorityPayload = (call: Omit<MemoryToolCall, "envelope"> & { envelope: Omit<MemoryToolCallEnvelope, "authority"> }): string => {
   return canonicalJsonStringify({
     argument_sha256: hashCanonicalJson(call.arguments),
@@ -40,14 +34,123 @@ const authorityPayload = (call: Omit<MemoryToolCall, "envelope"> & { envelope: O
     // partial security view. This binds nested principal data, finite scope
     // grants, wake mode, session/audience fields, and every future envelope
     // field to the same canonical handoff.
-    envelope: canonicalEnvelope(call.envelope)
+    envelope: call.envelope
   });
 };
 
-const deepFreezeJson = (value: unknown): unknown => {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
-  for (const child of Object.values(value)) deepFreezeJson(child);
-  return Object.freeze(value);
+const SNAPSHOT_MAX_DEPTH = 64;
+const SNAPSHOT_MAX_NODES = 100_000;
+const SNAPSHOT_MAX_CONTAINER_WIDTH = 10_000;
+const SNAPSHOT_MAX_STRING_BYTES = 4 * 1024 * 1024;
+
+interface SnapshotBudget { nodes: number; stringBytes: number }
+
+/** Bounds an untrusted in-process graph without invoking any caller code. */
+const assertBoundedSnapshotGraph = (
+  value: unknown,
+  budget: SnapshotBudget = { nodes: 0, stringBytes: 0 },
+  active = new Set<object>(),
+  depth = 0
+): void => {
+  budget.nodes += 1;
+  if (depth > SNAPSHOT_MAX_DEPTH || budget.nodes > SNAPSHOT_MAX_NODES) throw new Error("memory tool call graph exceeds bounds");
+  if (typeof value === "string") {
+    budget.stringBytes += Buffer.byteLength(value, "utf8");
+    if (budget.stringBytes > SNAPSHOT_MAX_STRING_BYTES) throw new Error("memory tool call graph exceeds bounds");
+    return;
+  }
+  if (typeof value !== "object" || value === null) return;
+  if (utilTypes.isProxy(value) || active.has(value)) throw new Error("invalid memory tool call graph");
+  const array = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+    throw new Error("invalid memory tool call graph");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<string, PropertyDescriptor>;
+  const names = Object.getOwnPropertyNames(value);
+  if (Object.getOwnPropertySymbols(value).length > 0 || names.length > SNAPSHOT_MAX_CONTAINER_WIDTH + (array ? 1 : 0)) {
+    throw new Error("invalid memory tool call graph");
+  }
+  active.add(value);
+  try {
+    if (array) {
+      const lengthDescriptor = descriptors["length"];
+      const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+      if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0
+        || length > SNAPSHOT_MAX_CONTAINER_WIDTH || names.length !== length + 1
+        || names.some((key) => key !== "length" && !/^(0|[1-9]\d*)$/u.test(key))) {
+        throw new Error("invalid memory tool call graph");
+      }
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error("invalid memory tool call graph");
+        assertBoundedSnapshotGraph(descriptor.value, budget, active, depth + 1);
+      }
+      return;
+    }
+    for (const key of names) {
+      const descriptor = descriptors[key];
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error("invalid memory tool call graph");
+      budget.stringBytes += Buffer.byteLength(key, "utf8");
+      if (budget.stringBytes > SNAPSHOT_MAX_STRING_BYTES) throw new Error("memory tool call graph exceeds bounds");
+      assertBoundedSnapshotGraph(descriptor.value, budget, active, depth + 1);
+    }
+  } finally {
+    active.delete(value);
+  }
+};
+
+const toOrdinaryFrozenJson = (value: unknown): unknown => {
+  if (typeof value !== "object" || value === null) return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(toOrdinaryFrozenJson));
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    Object.defineProperty(output, key, {
+      configurable: false,
+      enumerable: true,
+      value: toOrdinaryFrozenJson(child),
+      writable: false
+    });
+  }
+  return Object.freeze(output);
+};
+
+const copyRecord = (
+  source: object,
+  replacement?: { key: string; value: unknown },
+  omit?: string
+): Record<string, unknown> => {
+  const output = Object.create(Object.getPrototypeOf(source)) as Record<string, unknown>;
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(source))) {
+    if (key === omit) continue;
+    Object.defineProperty(output, key, {
+      ...descriptor,
+      value: replacement?.key === key ? replacement.value : descriptor.value
+    });
+  }
+  return output;
+};
+
+/** The sole optional undefined field accepted by the tool-call type. */
+const omitUndefinedPrincipalQualifier = <T>(value: T): T => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const envelopeDescriptor = Object.getOwnPropertyDescriptor(value, "envelope");
+  if (!envelopeDescriptor || !("value" in envelopeDescriptor)
+    || typeof envelopeDescriptor.value !== "object" || envelopeDescriptor.value === null || Array.isArray(envelopeDescriptor.value)) return value;
+  const principalDescriptor = Object.getOwnPropertyDescriptor(envelopeDescriptor.value, "principal");
+  if (!principalDescriptor || !("value" in principalDescriptor)
+    || typeof principalDescriptor.value !== "object" || principalDescriptor.value === null || Array.isArray(principalDescriptor.value)) return value;
+  const qualifierDescriptor = Object.getOwnPropertyDescriptor(principalDescriptor.value, "qualifier");
+  if (!qualifierDescriptor || !("value" in qualifierDescriptor) || qualifierDescriptor.value !== undefined) return value;
+  const principal = copyRecord(principalDescriptor.value, undefined, "qualifier");
+  const envelope = copyRecord(envelopeDescriptor.value, { key: "principal", value: principal });
+  return copyRecord(value, { key: "envelope", value: envelope }) as T;
+};
+
+const snapshotCanonicalJson = <T>(value: T): T => {
+  assertBoundedSnapshotGraph(value);
+  const normalized = omitUndefinedPrincipalQualifier(value);
+  return toOrdinaryFrozenJson(parseCanonicalJson(canonicalJsonStringify(normalized))) as T;
 };
 
 /**
@@ -57,11 +160,11 @@ const deepFreezeJson = (value: unknown): unknown => {
  * also detaching every nested object from the caller.
  */
 export const snapshotMemoryToolCall = (call: MemoryToolCall): MemoryToolCall => {
-  const snapshot = parseCanonicalJson(canonicalJsonStringify({ ...call, envelope: canonicalEnvelope(call.envelope) }));
+  const snapshot = snapshotCanonicalJson(call);
   if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
     throw new Error("invalid authority call snapshot");
   }
-  return deepFreezeJson(snapshot) as MemoryToolCall;
+  return snapshot;
 };
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -75,10 +178,11 @@ export const createMemoryAuthorityHandoff = (config: MemoryAuthorityConfig): Mem
     bankId: trusted.bankId,
     runtimeId: trusted.runtimeId,
     issue: (call: Omit<MemoryToolCall, "envelope"> & { envelope: Omit<MemoryToolCallEnvelope, "authority"> }) => {
-      if (call.envelope.principal.agentId !== trusted.bankId) {
+      const snapshot = snapshotCanonicalJson(call);
+      if (snapshot.envelope.principal.agentId !== trusted.bankId) {
         throw new Error("authority principal does not own this memory bank");
       }
-      return signature(trusted, authorityPayload(call));
+      return signature(trusted, authorityPayload(snapshot));
     }
   });
 };

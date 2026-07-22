@@ -48,6 +48,8 @@ This folder is the standalone Noopolis memory package implementation.
   run and owner stream, and an event cannot cite itself. Summary, forget, and
   promote emit separate content-free write/lifecycle facts.
 - `kernel/` executes `memory.*` tools against the store, index, and policy.
+  `untrusted.ts` owns the fixed, non-reflective result and digest values used
+  when an in-process tool-call graph cannot be safely canonicalized.
   `mutations.ts` holds the four capability-gated mutating tools
   (register/summarize/forget/promote), split out of `kernel.ts` to stay
   under 400 lines. Each one calls `assertToolCapability` and then (B62)

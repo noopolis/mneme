@@ -7,6 +7,7 @@ import test from "node:test";
 import { hashCanonicalJson } from "../contract/causal.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import { CausalEventStore } from "../store/causalStore.js";
+import { UNTRUSTED_ARGUMENT_SHA256, UNTRUSTED_REQUEST_SHA256 } from "../kernel/untrusted.js";
 import {
   guardKernelForRecallMode,
   MNEME_RECALL_MODE_ENV,
@@ -259,6 +260,37 @@ test("B45 recall-mode guard executes and records only its immutable signed call 
     const outcome = (await causalStore.read()).find((event) => event.type === "memory.tool.outcome");
     assert.equal(outcome?.principal_id, "agent:agent-a");
     assert.equal(outcome?.payload.argument_sha256, expectedArgumentHash);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("B45 recall-mode snapshot failure never inspects the rejected call", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mneme-recall-mode-hostile-"));
+  try {
+    const authority = { secret: "recall hostile authority", bankId: "agent-a", runtimeId: "recall-hostile-runtime" };
+    const causalStore = new CausalEventStore(root);
+    const guarded = guardKernelForRecallMode(makeCountingKernel().kernel, "off", { runtimeHomePath: root, authority, causalStore });
+    let trapHits = 0;
+    const hostile = new Proxy(toolCall("memory.search"), {
+      get: (target, key, receiver) => { trapHits += 1; return Reflect.get(target, key, receiver); },
+      ownKeys: (target) => { trapHits += 1; return Reflect.ownKeys(target); }
+    });
+
+    const result = await guarded.search(hostile);
+    assert.equal(trapHits, 0);
+    assert.equal(result.decision, "malformed_request");
+    assert.equal(result.request_id, "mneme:uncorrelated-invalid-request");
+    const events = await causalStore.read();
+    assert.equal(events.length, 1);
+    assert.equal(events[0].principal_id, "system:mneme");
+    assert.deepEqual(events[0].cause_event_ids, []);
+    assert.deepEqual(events[0].payload, {
+      argument_sha256: UNTRUSTED_ARGUMENT_SHA256,
+      decision: "malformed_request",
+      request_sha256: UNTRUSTED_REQUEST_SHA256,
+      tool: "memory.search"
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

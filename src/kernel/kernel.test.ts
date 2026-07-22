@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { JsonlMemoryStore } from "../store/store.js";
+import { CausalEventStore } from "../store/causalStore.js";
 import { createMemoryKernel } from "./kernel.js";
+import { UNTRUSTED_ARGUMENT_SHA256, UNTRUSTED_REQUEST_SHA256 } from "./untrusted.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import type { MemoryToolCall } from "../contract/types.js";
@@ -232,4 +234,29 @@ test("forget writes tombstones and suppresses source in search", async () => {
   }));
 
   assert.equal(search.content.every((entry) => !entry.event_ids.includes(forgotten)), true);
+});
+
+test("kernel never reflects into an uncanonicalizable call", async () => {
+  const root = await tempDir();
+  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
+  let getterHits = 0;
+  const hostile = new Proxy(call("hostile", "memory.search", { agentId: "agent-a", scope: "global" }, {}), {
+    get: (target, key, receiver) => { getterHits += 1; return Reflect.get(target, key, receiver); },
+    ownKeys: (target) => { getterHits += 1; return Reflect.ownKeys(target); }
+  });
+
+  const result = await kernel.search(hostile);
+  assert.equal(getterHits, 0);
+  assert.equal(result.decision, "malformed_request");
+  assert.equal(result.request_id, "mneme:uncorrelated-invalid-request");
+  const events = await new CausalEventStore(root).read();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].principal_id, "system:mneme");
+  assert.deepEqual(events[0].cause_event_ids, []);
+  assert.deepEqual(events[0].payload, {
+    argument_sha256: UNTRUSTED_ARGUMENT_SHA256,
+    decision: "malformed_request",
+    request_sha256: UNTRUSTED_REQUEST_SHA256,
+    tool: "memory.search"
+  });
 });

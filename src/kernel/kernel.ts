@@ -37,6 +37,12 @@ import {
 } from "./support.js";
 import { prepareSearchCandidates } from "./search.js";
 import { forgetMemory, promoteMemory, registerMemory, summarizeMemory } from "./mutations.js";
+import {
+  malformedUntrustedToolCall,
+  unavailableUntrustedToolCall,
+  UNTRUSTED_ARGUMENT_SHA256,
+  UNTRUSTED_REQUEST_SHA256
+} from "./untrusted.js";
 
 export interface MemoryKernelConfig {
   runtimeHomePath: string;
@@ -83,6 +89,14 @@ export class JsonlMemoryKernel implements MemoryKernel {
     });
   }
 
+  private async untrustedOutcome(tool: MemoryToolName): Promise<void> {
+    await appendToolOutcomeEvent(this.causalStore, {
+      runId: resolveCausalRunId(), agentId: "mneme-system", principalId: "system:mneme",
+      causeEventIds: [], tool, decision: "malformed_request",
+      argumentHash: UNTRUSTED_ARGUMENT_SHA256, requestHash: UNTRUSTED_REQUEST_SHA256
+    });
+  }
+
   /** MCP has no upstream wake event, so persist its Mneme-owned request fact
    * before any lifecycle or outcome event is allowed to cite it. */
   private async requestParent(call: MemoryToolCall, tool: MemoryToolName): Promise<void> {
@@ -112,9 +126,9 @@ export class JsonlMemoryKernel implements MemoryKernel {
       // canonicalizes once more at its own public boundary and returns the
       // verified frozen value used below.
       attemptedCall = snapshotMemoryToolCall(call);
-    } catch (error) {
-      const result = malformed(call, tool, error instanceof Error ? error.message : "invalid authority", startAt);
-      try { await this.outcome(call, tool, "malformed_request", false); } catch { return unavailable(call, tool, "memory evidence unavailable", startAt); }
+    } catch {
+      const result = malformedUntrustedToolCall(tool, startAt);
+      try { await this.untrustedOutcome(tool); } catch { return unavailableUntrustedToolCall(tool, startAt); }
       return result;
     }
 

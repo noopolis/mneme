@@ -5,6 +5,12 @@ import { resolveCausalRunId } from "../contract/causal.js";
 import { MemoryAuthorityGuard, snapshotMemoryToolCall, type MemoryAuthorityConfig } from "../policy/authority.js";
 import { appendToolOutcomeEvent, appendToolRequestEvent, type CausalEventStore } from "../store/causalStore.js";
 import { hashArgumentsForEvidence } from "../kernel/support.js";
+import {
+  malformedUntrustedToolCall,
+  unavailableUntrustedToolCall,
+  UNTRUSTED_ARGUMENT_SHA256,
+  UNTRUSTED_REQUEST_SHA256
+} from "../kernel/untrusted.js";
 import type { MemoryRecallEntry } from "./support.js";
 import type {
   MemoryEvent,
@@ -230,7 +236,17 @@ export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecal
   const deniedRead = async (call: MemoryToolCall, tool: "memory.search" | "memory.locate"): Promise<MemoryToolResult> => {
     const startAt = Date.now();
     let attemptedCall: MemoryToolCall;
-    try { attemptedCall = snapshotMemoryToolCall(call); } catch { return { ...emptyResult(call, tool), decision: "malformed_request", error: "invalid authority" }; }
+    try { attemptedCall = snapshotMemoryToolCall(call); } catch {
+      const result = malformedUntrustedToolCall(tool, startAt);
+      if (!evidence) return result;
+      try {
+        await appendToolOutcomeEvent(evidence.causalStore, {
+          runId: resolveCausalRunId(), agentId: "mneme-system", principalId: "system:mneme", causeEventIds: [], tool,
+          decision: "malformed_request", argumentHash: UNTRUSTED_ARGUMENT_SHA256, requestHash: UNTRUSTED_REQUEST_SHA256
+        });
+      } catch { return unavailableUntrustedToolCall(tool, startAt); }
+      return result;
+    }
     if (!guard || !evidence) return emptyResult(attemptedCall, tool);
     if (attemptedCall.tool !== tool) return malformedRead(attemptedCall, tool, startAt);
     let verifiedCall: MemoryToolCall;

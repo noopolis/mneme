@@ -1,3 +1,5 @@
+import { types as utilTypes } from "node:util";
+
 /** Native B41 canonical JSON implementation.  This deliberately does not use
  * JSON.parse: JSON.parse accepts duplicate keys, which is unsafe for evidence. */
 const enc = new TextEncoder();
@@ -25,12 +27,31 @@ const canonical = (value: unknown, seen = new Set<object>(), where = "root"): un
     }
     return value;
   }
-  if (typeof value !== "object" || value === null || seen.has(value)) throw new Error(`${where}: non-canonical JSON value`);
+  if (typeof value !== "object" || value === null || utilTypes.isProxy(value) || seen.has(value)) {
+    throw new Error(`${where}: non-canonical JSON value`);
+  }
   seen.add(value);
   if (Array.isArray(value)) {
-    if (Object.getOwnPropertySymbols(value).length || Object.getOwnPropertyNames(value).some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))) throw new Error(`${where}: non-canonical array`);
-    const out = value.map((entry, index) => canonical(entry, seen, `${where}[${index}]`));
-    if (out.length !== value.length) throw new Error(`${where}: sparse array`);
+    if (Object.getPrototypeOf(value) !== Array.prototype || Object.getOwnPropertySymbols(value).length) {
+      throw new Error(`${where}: non-canonical array`);
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<string, PropertyDescriptor>;
+    const lengthDescriptor = descriptors["length"];
+    const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+    const names = Object.getOwnPropertyNames(value);
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0
+      || names.some((key) => key !== "length" && !/^(0|[1-9]\d*)$/.test(key))
+      || names.length !== length + 1) {
+      throw new Error(`${where}: non-canonical array`);
+    }
+    const out = new Array<unknown>(length);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new Error(`${where}: sparse/accessor array`);
+      }
+      out[index] = canonical(descriptor.value, seen, `${where}[${index}]`);
+    }
     seen.delete(value); return out;
   }
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw new Error(`${where}: non-plain object`);

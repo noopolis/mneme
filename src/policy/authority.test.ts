@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createMemoryAuthorityHandoff } from "./authority.js";
+import { createMemoryAuthorityHandoff, snapshotMemoryToolCall } from "./authority.js";
 import { createMemoryKernel } from "../kernel/kernel.js";
 import { createMemoryRuntime, memoryAuthorityRuntimeId } from "../runtime/runtime.js";
 import { CausalEventStore } from "../store/causalStore.js";
@@ -128,6 +128,78 @@ test("B45 snapshots arguments, nested principal, finite scopes, and mode before 
   const outcome = (await new CausalEventStore(root).read()).find((event) => event.type === "memory.tool.outcome");
   assert.equal(outcome?.principal_id, "agent:agent-a");
   assert.equal(outcome?.payload.argument_sha256, expectedArgumentHash);
+});
+
+test("B45 rejects hostile call graphs without invoking caller code", () => {
+  const cases: Array<{ hits: () => number; value: MemoryToolCall }> = [];
+  for (const target of ["request", "envelope", "principal", "arguments"] as const) {
+    let hits = 0;
+    const value = call({}, `req:accessor-${target}`);
+    const owner: object = target === "request" ? value
+      : target === "envelope" ? value.envelope
+        : target === "principal" ? value.envelope.principal : value.arguments;
+    const key = target === "request" ? "request_id"
+      : target === "envelope" ? "thread_id"
+        : target === "principal" ? "agentId" : "query";
+    Object.defineProperty(owner, key, { enumerable: true, get: () => { hits += 1; return "attacker"; } });
+    cases.push({ hits: () => hits, value });
+  }
+  let indexHits = 0;
+  const indexed = call({}, "req:index-accessor");
+  const aliases = ["current"];
+  Object.defineProperty(aliases, "0", { enumerable: true, get: () => { indexHits += 1; return "all"; } });
+  indexed.envelope.allowed_scope_aliases = aliases as MemoryToolCallEnvelope["allowed_scope_aliases"];
+  cases.push({ hits: () => indexHits, value: indexed });
+  let proxyHits = 0;
+  const proxied = new Proxy(call({}, "req:proxy"), { ownKeys: (target) => { proxyHits += 1; return Reflect.ownKeys(target); } });
+  cases.push({ hits: () => proxyHits, value: proxied });
+
+  for (const entry of cases) {
+    assert.throws(() => snapshotMemoryToolCall(entry.value));
+    assert.equal(entry.hits(), 0);
+  }
+
+  const sparse = call({}, "req:sparse");
+  sparse.envelope.allowed_scope_aliases = Array(1) as MemoryToolCallEnvelope["allowed_scope_aliases"];
+  assert.throws(() => snapshotMemoryToolCall(sparse));
+
+  let speciesHits = 0;
+  class HostileArray extends Array<string> {
+    static get [Symbol.species](): ArrayConstructor { speciesHits += 1; return Array; }
+  }
+  const subclassed = call({}, "req:array-subclass");
+  subclassed.envelope.allowed_scope_aliases = new HostileArray("current") as MemoryToolCallEnvelope["allowed_scope_aliases"];
+  assert.throws(() => snapshotMemoryToolCall(subclassed));
+  assert.equal(speciesHits, 0);
+});
+
+test("B45 snapshots to bounded ordinary frozen values without preserving aliases", () => {
+  const shared = { value: "before" };
+  const content = Object.create(null) as Record<string, unknown>;
+  Object.defineProperty(content, "__proto__", { enumerable: true, value: { safe: true } });
+  const request = call({}, "req:ordinary-snapshot", {
+    scope: "current", query: "x", content, first: shared, second: shared
+  });
+  const snapshot = snapshotMemoryToolCall(request);
+  const args = snapshot.arguments as Record<string, unknown>;
+  const first = args.first as Record<string, unknown>;
+  const second = args.second as Record<string, unknown>;
+  const frozenContent = args.content as Record<string, unknown>;
+  shared.value = "after";
+  assert.equal(Object.getPrototypeOf(args), Object.prototype);
+  assert.equal(Object.getPrototypeOf(frozenContent), Object.prototype);
+  assert.equal(Object.prototype.hasOwnProperty.call(frozenContent, "__proto__"), true);
+  assert.equal((frozenContent.__proto__ as Record<string, unknown>).safe, true);
+  assert.equal(Object.isFrozen(args) && Object.isFrozen(first) && Object.isFrozen(second), true);
+  assert.notEqual(first, second);
+  assert.equal(first.value, "before");
+  assert.equal(second.value, "before");
+
+  let deep: Record<string, unknown> = {};
+  for (let index = 0; index < 66; index += 1) deep = { next: deep };
+  const oversized = call({}, "req:deep-snapshot");
+  oversized.arguments = deep;
+  assert.throws(() => snapshotMemoryToolCall(oversized), /exceeds bounds/);
 });
 
 test("B45 authority cannot cross a bank or runtime even when deployments reuse a secret", async () => {

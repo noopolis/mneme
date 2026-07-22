@@ -47,11 +47,11 @@ const recallForMode = async (mode: "on" | "off" | "shuffled") => {
 
   try {
     const runtime = createMemoryRuntime({ agentId, runtimeHomePath: root, tokenBudget: 128 });
-    await seed(runtime, roomPrincipal, "seed-marker", `${MARKER} launch status ${"x".repeat(560)}`);
-    await seed(runtime, globalPrincipal, "seed-decoy", `${DECOY} printer status`);
+    await seed(runtime, roomPrincipal, "daimon:seed-marker", `${MARKER} launch status ${"x".repeat(560)}`);
+    await seed(runtime, globalPrincipal, "daimon:seed-decoy", `${DECOY} printer status`);
     return await runtime.prepareTurn({
       context,
-      eventId: `query-${mode}`,
+      eventId: `daimon:query-${mode}`,
       kind: "message",
       text: "launch status"
     });
