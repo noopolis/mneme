@@ -77,7 +77,7 @@ const setup = async (
     case "memory.locate": return { query: marker };
     case "memory.register": return {
       scope: selectedScope, kind: "text", content: { kind: "text", text: marker }, visibility: "global",
-      sensitivity: "normal", evidence_event_ids: ["daimon:matrix-evidence"], source_type: "matrix"
+      sensitivity: "normal", source_type: "matrix"
     };
     case "memory.summarize": return { scope: "current", horizon: 5 };
     case "memory.forget": return { scope: selectedScope, event_ids: [target], reason: marker };

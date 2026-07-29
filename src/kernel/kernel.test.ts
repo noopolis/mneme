@@ -141,42 +141,24 @@ test("B45 search and locate audit metadata omit unauthorized source principals",
   assert.equal(JSON.stringify({ search, locate }).includes("UNAUTHORIZED_AUDIT_MARKER"), false);
 });
 
-test("register requires evidence to persist", async () => {
+test("register derives provenance from the authenticated wake", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
   const kernel = createMemoryKernel({ runtimeHomePath: root, source: "kernel-test", authority: TEST_AUTHORITY });
   const principal: Principal = { agentId: "agent-a", scope: "global" };
-  const evidence = await seedText(store, principal, {
-    visibility: "global",
-    text: "EVIDENCE_MARKER"
-  });
-
-  const rejected = await kernel.register(call("reg-1", "memory.register", principal, {
-    scope: memoryScopeId(principal),
-    kind: "text",
-    content: { kind: "text", text: "bad" },
-    visibility: "global",
-    sensitivity: "normal",
-    evidence_event_ids: [],
-    source_type: "test"
-  }));
-
-  assert.equal(rejected.decision, "malformed_request");
-
   const accepted = await kernel.register(call("reg-2", "memory.register", principal, {
     scope: memoryScopeId(principal),
     kind: "text",
     content: { kind: "text", text: "recorded memory" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: [evidence],
     source_type: "test"
   }));
 
   assert.equal(accepted.decision, "allow_raw");
   const stored = await store.read({ types: ["memory.registered"], principalAgentId: principal.agentId });
   assert.equal(stored.length, 1);
-  assert.equal(stored[0].parentEventIds.includes(evidence), true);
+  assert.deepEqual(stored[0].parentEventIds, ["daimon:wake-kernel"]);
 });
 
 test("summarize returns provenance and stores a summary event", async () => {

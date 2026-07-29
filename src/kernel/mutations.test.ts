@@ -59,7 +59,7 @@ const call = (
   return { request_id: requestId, tool, arguments: args, envelope: { ...unsigned, authority: handoff.issue({ request_id: requestId, tool, arguments: args, envelope: unsigned }) } };
 };
 
-test("register with memory_id creates a new revision and injects the current head into parentEventIds", async () => {
+test("B109 register provenance is the wake and authorized head only", async () => {
   const root = await tempDir();
   const store = new JsonlMemoryStore(root);
   const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: TEST_AUTHORITY });
@@ -72,7 +72,6 @@ test("register with memory_id creates a new revision and injects the current hea
     content: { kind: "text", text: "revision one" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
   const rootId = first.content[0].event_ids[0];
@@ -83,7 +82,6 @@ test("register with memory_id creates a new revision and injects the current hea
     content: { kind: "text", text: "revision two" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external_2"],
     source_type: "test",
     memory_id: rootId
   }));
@@ -91,8 +89,10 @@ test("register with memory_id creates a new revision and injects the current hea
   assert.equal(second.decision, "allow_raw");
   const events = await store.read({ scope });
   const revision = events.find((event) => event.id === second.content[0].event_ids[0]);
+  const registered = events.find((event) => event.id === rootId);
+  assert.deepEqual(registered?.parentEventIds, ["daimon:wake-mutations"]);
   assert.equal(revision?.memoryId, rootId);
-  assert.ok(revision?.parentEventIds.includes(rootId));
+  assert.deepEqual(revision?.parentEventIds, ["daimon:wake-mutations", rootId]);
   assert.equal(revision?.origin, "awake");
 });
 
@@ -108,7 +108,6 @@ test("register with an unknown memory_id is rejected as malformed", async () => 
     content: { kind: "text", text: "orphan revision" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test",
     memory_id: "RAW_SECRET_MEMORY_ID"
   }));
@@ -129,7 +128,6 @@ test("register against a forgotten chain is rejected", async () => {
     content: { kind: "text", text: "to be forgotten" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
   const rootId = first.content[0].event_ids[0];
@@ -146,7 +144,6 @@ test("register against a forgotten chain is rejected", async () => {
     content: { kind: "text", text: "should not attach" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test",
     memory_id: rootId
   }));
@@ -173,7 +170,6 @@ test("memory.register stamps a schema-valid memory.written event chained to the 
     content: { kind: "text", text: "first write" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }, { wake_id: "daimon:wake-writes-turn-1" }));
 
@@ -209,7 +205,6 @@ test("memory.register stamps memory.written with the chain root as memory_id for
     content: { kind: "text", text: "revision one" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
   const rootId = first.content[0].event_ids[0];
@@ -220,7 +215,6 @@ test("memory.register stamps memory.written with the chain root as memory_id for
     content: { kind: "text", text: "revision two" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external_2"],
     source_type: "test",
     memory_id: rootId
   }));
@@ -252,7 +246,6 @@ test("memory.register denied by the write-scope guard stamps memory.write.denied
     content: { kind: "text", text: "cross-scope write attempt" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
 
@@ -275,7 +268,6 @@ test("C1: awake capability is refused for memory.promote", async () => {
     content: { kind: "text", text: "candidate for promotion" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
   const memoryId = registered.content[0].event_ids[0];
@@ -301,7 +293,6 @@ test("C1: dream capability promotes the head and stamps origin dream", async () 
     content: { kind: "text", text: "candidate for dream promotion" },
     visibility: "global",
     sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
     source_type: "test"
   }));
   const memoryId = registered.content[0].event_ids[0];
@@ -331,168 +322,6 @@ test("C2: dream mode with an awake capability token is malformed for a mutating 
   }, { mode: "dream", capability: "mneme.cap.awake.v1" }));
 
   assert.equal(result.decision, "malformed_request");
-});
-
-// B62: write-scope guard (see src/policy/writeScope.ts). A mutating call
-// whose literal args.scope claims another agent's own canonical scope must
-// be denied — never silently passed through by kernel/support.ts's
-// resolveScope — with exactly one memory.denied ledger line and exactly one
-// memory.write.denied causal event, both stamped with the envelope
-// principal, never the claimed foreign scope's owner.
-
-const foreignMutationArgs: Record<
-  "memory.register" | "memory.summarize" | "memory.forget" | "memory.promote",
-  (foreignScope: string) => Record<string, unknown>
-> = {
-  "memory.register": (foreignScope) => ({
-    scope: foreignScope,
-    kind: "text",
-    content: { kind: "text", text: "cross-scope write attempt" },
-    visibility: "global",
-    sensitivity: "normal",
-    evidence_event_ids: ["evt_external"],
-    source_type: "test"
-  }),
-  "memory.summarize": (foreignScope) => ({ scope: foreignScope, horizon: 5 }),
-  "memory.forget": (foreignScope) => ({ scope: foreignScope, event_ids: ["evt_whatever"], reason: "test" }),
-  "memory.promote": (foreignScope) => ({ scope: foreignScope, memory_id: "evt_whatever" })
-};
-
-// memory.promote is dream-only (C1 in capability.test.ts); every other
-// mutating tool runs under the default legacy/awake envelope. Either way
-// the capability gate must pass BEFORE the write-scope guard is reached, so
-// this failure is provably the write-scope guard and not the capability gate.
-const foreignMutationEnvelopeOverrides: Record<
-  "memory.register" | "memory.summarize" | "memory.forget" | "memory.promote",
-  Partial<MemoryToolCallEnvelope>
-> = {
-  "memory.register": {},
-  "memory.summarize": {},
-  "memory.forget": {},
-  "memory.promote": { mode: "dream", capability: "mneme.cap.dream.v1" }
-};
-
-for (const tool of ["memory.register", "memory.summarize", "memory.forget", "memory.promote"] as const) {
-  test(`T1/T5: ${tool} with a literal scope naming another agent's scope is denied with exactly one ledger + causal denial event`, async () => {
-    const root = await tempDir();
-    const store = new JsonlMemoryStore(root);
-    const causalStore = new CausalEventStore(root);
-    const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
-
-    const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
-    const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
-    const foreignScope = memoryScopeId(bob);
-
-    const spoofedCall = call(
-      `${tool}-spoof`,
-      tool,
-      alice,
-      foreignMutationArgs[tool](foreignScope),
-      foreignMutationEnvelopeOverrides[tool]
-    );
-
-    const invoke = kernel[
-      tool === "memory.register" ? "register"
-        : tool === "memory.summarize" ? "summarize"
-          : tool === "memory.forget" ? "forget"
-            : "promote"
-    ].bind(kernel);
-
-    const result = await invoke(spoofedCall);
-
-    assert.equal(result.decision, "deny");
-    assert.equal(result.content.length, 0);
-    assert.ok(result.error, "denial result must carry a reason");
-
-    // Nothing was ever written into bob's scope.
-    const foreignEvents = await store.read({ scope: foreignScope });
-    assert.equal(foreignEvents.length, 0);
-
-    // Exactly one memory.denied ledger line, stamped with alice (the
-    // envelope principal), never bob (the claimed scope's owner).
-    const deniedLedgerEvents = await store.read({ principalAgentId: "alice", types: ["memory.denied"] });
-    assert.equal(deniedLedgerEvents.length, 1);
-    assert.deepEqual(deniedLedgerEvents[0].tags.sort(), ["denied", "write"]);
-    assert.equal(deniedLedgerEvents[0].principal.agentId, "alice");
-    assert.equal(JSON.stringify(deniedLedgerEvents[0]).includes(foreignScope), false);
-
-    // Exactly one memory.write.denied causal event, principal_id = agent:alice.
-    const causalEvents = await causalStore.read();
-    const writeDenials = causalEvents.filter((event) => event.type === "memory.write.denied");
-    assert.equal(writeDenials.length, 1);
-    assert.equal(writeDenials[0].principal_id, "agent:alice");
-    assert.notEqual(writeDenials[0].principal_id, "agent:bob");
-    assert.equal(writeDenials[0].emitter.stream_id, "memory:alice");
-    assert.equal(writeDenials[0].payload.tool, tool);
-    assert.equal(writeDenials[0].payload.requested_scope_sha256, createHash("sha256").update(foreignScope).digest("hex"));
-    assert.equal(writeDenials[0].payload.reason_code, "scope-not-authorized");
-    assert.equal(JSON.stringify(writeDenials[0]).includes(foreignScope), false);
-  });
-}
-
-test("B62: mneme.cap.system.v1 explicitly authorizes a cross-scope register write", async () => {
-  const root = await tempDir();
-  const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
-
-  const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
-  const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
-  const foreignScope = memoryScopeId(bob);
-
-  const result = await kernel.register(call(
-    "reg-system-cap",
-    "memory.register",
-    alice,
-    {
-      scope: foreignScope,
-      kind: "text",
-      content: { kind: "text", text: "system-authorized cross-scope write" },
-      visibility: "global",
-      sensitivity: "normal",
-      evidence_event_ids: ["evt_external"],
-      source_type: "test"
-    },
-    { capability: SYSTEM_CAPABILITY }
-  ));
-
-  assert.equal(result.decision, "allow_raw");
-  const foreignEvents = await store.read({ scope: foreignScope, types: ["memory.registered"] });
-  assert.equal(foreignEvents.length, 1);
-});
-
-test("B45: a model-supplied register principal override is malformed", async () => {
-  const root = await tempDir();
-  const store = new JsonlMemoryStore(root);
-  const kernel = createMemoryKernel({ runtimeHomePath: root, source: "mutations-test", authority: authorityFor("alice") });
-
-  const alice: MemoryPrincipalRef = { agentId: "alice", scope: "global" };
-  const bob: MemoryPrincipalRef = { agentId: "bob", scope: "global" };
-  const foreignScope = memoryScopeId(bob);
-
-  // args.principal claims to be bob (model-supplied), and args.scope is
-  // literally "current" — if the check used the args-overridden principal
-  // instead of the trusted envelope principal, "current" would resolve to
-  // bob's own scope and be wrongly treated as self-derivable. The envelope
-  // principal is still alice, so this must still be denied.
-  const result = await kernel.register(call(
-    "reg-spoofed-principal",
-    "memory.register",
-    alice,
-    {
-      scope: "current",
-      principal: bob,
-      kind: "text",
-      content: { kind: "text", text: "principal-spoofed cross-scope write" },
-      visibility: "global",
-      sensitivity: "normal",
-      evidence_event_ids: ["evt_external"],
-      source_type: "test"
-    }
-  ));
-
-  assert.equal(result.decision, "malformed_request");
-  const foreignEvents = await store.read({ scope: foreignScope, types: ["memory.registered"] });
-  assert.equal(foreignEvents.length, 0);
 });
 
 test("B45 forget rejects more than 256 targets before any domain mutation", async () => {

@@ -15,11 +15,7 @@ import {
   denyWriteScope,
   hasInvalidV1Envelope,
   eventText,
-  isForgetArguments,
-  isPromoteArguments,
-  isRegisterArguments,
   isRecallableMemoryEvent,
-  isSummarizeArguments,
   makeAudit,
   malformed,
   ownsMemoryTarget,
@@ -28,6 +24,7 @@ import {
   resolveScope,
   sanitizePrincipal
 } from "./support.js";
+import { isForgetArguments, isPromoteArguments, isRegisterArguments, isSummarizeArguments } from "./mutationArguments.js";
 import { recordMemoryForgottenEvidence, recordMemoryPromotedEvidence, recordMemorySummaryEvidence, recordMemoryWriteEvidence } from "./mutationEvidence.js";
 
 /** Four capability- and scope-gated mutating memory tools, split from the
@@ -49,7 +46,7 @@ export const registerMemory = async (
   }
   const args = call.arguments;
   if (!isRegisterArguments(args)) {
-    return malformed(call, "memory.register", "memory.register requires evidence and content fields", startAt);
+    return malformed(call, "memory.register", "memory.register requires content fields", startAt);
   }
 
   const principal = sanitizePrincipal(call.envelope.principal);
@@ -66,7 +63,8 @@ export const registerMemory = async (
   }
 
   try {
-    let parentEventIds = args.evidence_event_ids;
+    const trustedEvidenceEventIds = [call.envelope.wake_id];
+    let parentEventIds = trustedEvidenceEventIds;
     if (args.memory_id) {
       const existing = await store.read({ scope });
       const head = projectLifecycle(existing).heads.get(args.memory_id);
@@ -80,7 +78,7 @@ export const registerMemory = async (
       if (!ownsMemoryTarget(revision, scope, principal)) {
         return malformed(call, "memory.register", "memory revision target is not authorized", startAt);
       }
-      parentEventIds = [...new Set([...args.evidence_event_ids, head.revisionId])];
+      parentEventIds = [...new Set([...trustedEvidenceEventIds, head.revisionId])];
     }
 
     const event = await store.append({
@@ -119,7 +117,7 @@ export const registerMemory = async (
       decision: "allow_raw",
       content: [{
         kind: "memory",
-        text: "Registered memory with explicit evidence.",
+        text: "Registered memory with authenticated invocation provenance.",
         event_ids: [event.id],
         scope: event.scope,
         principal: event.principal,

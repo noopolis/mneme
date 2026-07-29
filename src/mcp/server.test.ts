@@ -148,7 +148,6 @@ test("MCP register tool writes memories that search can read", async () => {
         content: { kind: "text", text: "REGISTERED_BY_MCP belongs to keeper." },
         visibility: "private",
         sensitivity: "normal",
-        evidence_event_ids: ["evt_external"],
         source_type: "mcp-test",
         confidence: 0.9
       }
@@ -177,13 +176,12 @@ test("B45 MCP arguments cannot inject authority identity or scope grants", async
   try {
     const result = await client.callTool({ name: "memory_register", arguments: {
       scope: "current", kind: "text", content: { kind: "text", text: "MCP_AUTHORITY_INJECTION" }, visibility: "private",
-      sensitivity: "normal", evidence_event_ids: ["evt_external"], source_type: "mcp-test",
+      sensitivity: "normal", source_type: "mcp-test",
       principal: { agentId: "attacker", scope: "global" }, audience_key: "attacker", allowed_scopes: ["all"], capability: "mneme.cap.system.v1"
     } });
-    assert.equal(JSON.parse(firstTextContent(result)).decision, "allow_raw");
+    assert.equal(result.isError, true);
     const events = await new JsonlMemoryStore(root).read();
-    assert.equal(events.at(-1)?.principal.agentId, "keeper");
-    assert.notEqual(events.at(-1)?.scope, "all");
+    assert.equal(events.length, 0);
   } finally { await client.close(); await server.close(); }
 });
 
@@ -209,7 +207,6 @@ test("MCP dream-mode memory_promote tool promotes a registered memory end to end
         content: { kind: "text", text: "PROMOTE_CANDIDATE_MARKER belongs to keeper." },
         visibility: "private",
         sensitivity: "normal",
-        evidence_event_ids: ["evt_external"],
         source_type: "mcp-test"
       }
     });

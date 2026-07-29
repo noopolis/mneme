@@ -605,7 +605,6 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
       content: { kind: "text", text: "roadmap v1" },
       visibility: "global",
       sensitivity: "normal",
-      evidence_event_ids: ["evt_external"],
       source_type: "test"
     }, "reg-b70-1"));
     const rootId = first.content[0].event_ids[0];
@@ -616,7 +615,6 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
       content: { kind: "text", text: "roadmap v2 (revised)" },
       visibility: "global",
       sensitivity: "normal",
-      evidence_event_ids: ["evt_external_2"],
       source_type: "test",
       memory_id: rootId
     }, "reg-b70-2"));
@@ -862,7 +860,6 @@ for (const recallMode of ["on", "off", "shuffled"] as const) {
         content: { kind: "text", text: `write under recall mode ${recallMode}` },
         visibility: "global",
         sensitivity: "normal",
-        evidence_event_ids: ["evt_external"],
         source_type: "test"
       }, "memory.register")
     };
