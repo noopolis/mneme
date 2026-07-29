@@ -9,13 +9,9 @@ import type {
   MemoryEventInput,
   MemoryEventType,
   MemoryContent,
-  MemoryForgetArguments,
   MemoryLocateArguments,
   MemoryPrincipalRef,
-  MemoryPromoteArguments,
-  MemoryRegisterArguments,
   MemorySearchArguments,
-  MemorySummarizeArguments,
   MemoryToolCall,
   MemoryToolAudit,
   MemoryToolCallEnvelope,
@@ -42,7 +38,7 @@ export type MemoryResultItem = Omit<MemoryToolResultContent, "event_ids" | "reda
 };
 
 const isString = (value: unknown): value is string => typeof value === "string";
-const hasText = (value: unknown): value is string => isString(value) && value.trim().length > 0;
+export const hasText = (value: unknown): value is string => isString(value) && value.trim().length > 0;
 
 export const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -66,9 +62,6 @@ export const isSearchArguments = (value: Record<string, unknown>): value is Omit
 
 export const isLocateArguments = (value: Record<string, unknown>): value is Omit<MemoryLocateArguments, "query"> & { query: string } =>
   hasText(value.query);
-
-export const isSummarizeArguments = (value: Record<string, unknown>): value is Omit<MemorySummarizeArguments, "scope"> & { scope: string } =>
-  hasText(value.scope);
 
 const isTextContent = (value: Record<string, unknown>): value is MemoryContent =>
   isPlainObject(value) && value.kind === "text" && hasText(value.text);
@@ -119,39 +112,6 @@ export const isMemoryContent = (value: unknown): value is MemoryContent => {
   }
 
   return false;
-};
-
-export const isRegisterArguments = (value: unknown): value is MemoryRegisterArguments =>
-  isPlainObject(value)
-  && hasText(value.scope)
-  && hasText(value.kind)
-  && hasText(value.visibility)
-  && hasText(value.sensitivity)
-  && hasText(value.source_type)
-  && isVisibility(value.visibility)
-  && isSensitivity(value.sensitivity)
-  && isPlainObject(value.content)
-  && isMemoryContent(value.content)
-  && Array.isArray(value.evidence_event_ids)
-  && value.evidence_event_ids.length > 0
-  && value.evidence_event_ids.every((id) => isString(id))
-  && (value.memory_id === undefined || hasText(value.memory_id))
-  && !Object.prototype.hasOwnProperty.call(value, "principal");
-
-export const isPromoteArguments = (value: unknown): value is MemoryPromoteArguments =>
-  isPlainObject(value) && hasText(value.scope) && hasText(value.memory_id);
-
-export const isForgetArguments = (value: unknown): value is MemoryForgetArguments => {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-
-  return hasText(value.scope)
-    && Array.isArray(value.event_ids)
-    && value.event_ids.length > 0
-    && value.event_ids.length <= 256
-    && value.event_ids.every((id) => isString(id))
-    && new Set(value.event_ids).size === value.event_ids.length;
 };
 
 export const makeAudit = (

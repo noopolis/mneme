@@ -80,6 +80,17 @@ test("createMemoryToolDescriptors supports dream mode with maintenance-focused i
   assert.ok(descriptors[0]?.description.includes("maintenance"));
 });
 
+test("B109 register instructions bind provenance to the authenticated invocation", () => {
+  for (const instructions of [getAwakeMemoryToolInstructions(), getDreamMemoryToolInstructions()]) {
+    const register = instructions["memory.register"];
+    const text = [register.description, register.promptSnippet, ...register.promptGuidelines].join("\n");
+    assert.match(text, /authenticated invocation/);
+    assert.match(text, /attached automatically/);
+    assert.match(text, /Do not supply evidence ids or identity fields/);
+    assert.doesNotMatch(text, /explicit evidence/i);
+  }
+});
+
 test("C3: AWAKE stays 5 tools, DREAM_SAFE becomes 6 — memory.promote is dream-only", () => {
   assert.equal(MEMORY_TOOLS_AWAKE.length, 5);
   assert.equal(MEMORY_TOOLS_DREAM_SAFE.length, 6);

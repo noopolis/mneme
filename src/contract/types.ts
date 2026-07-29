@@ -157,7 +157,6 @@ export interface MemoryRegisterArguments {
   content: MemoryContent;
   visibility: MemoryVisibility;
   sensitivity: MemorySensitivity;
-  evidence_event_ids: string[];
   source_type: string;
   confidence?: number;
   /** When set, register this as a new revision of an existing memory chain. */

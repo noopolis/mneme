@@ -106,10 +106,11 @@ export const AWAKE_MEMORY_TOOL_INSTRUCTIONS: Record<
     ]
   },
   "memory.register": {
-    description: "Register a durable memory with explicit evidence and visibility.",
-    promptSnippet: "Register durable memories with evidence and an explicit visibility.",
+    description: "Register a durable memory with authenticated invocation provenance and explicit visibility.",
+    promptSnippet: "Register durable memories with explicit visibility; invocation provenance is attached automatically.",
     promptGuidelines: [
       "Use memory_register for stable facts, decisions, relationships, or artifacts that should survive future turns.",
+      "Do not supply evidence ids or identity fields; provenance and principal come from the authenticated invocation.",
       "Choose the narrowest visibility that fits the memory."
     ]
   },
@@ -150,10 +151,11 @@ export const DREAM_MEMORY_TOOL_INSTRUCTIONS: Record<
     ]
   },
   "memory.register": {
-    description: "Register durable consolidated memories with explicit evidence and conservative visibility.",
-    promptSnippet: "Register durable entries only after evidence-backed review in maintenance mode.",
+    description: "Register durable consolidated memories with authenticated invocation provenance and conservative visibility.",
+    promptSnippet: "Register durable entries after review; invocation provenance is attached automatically.",
     promptGuidelines: [
       "Use memory_register for consolidation outputs with clear provenance.",
+      "Do not supply evidence ids or identity fields; provenance and principal come from the authenticated invocation.",
       "Prefer conservative confidence and narrow visibility by default."
     ]
   },
