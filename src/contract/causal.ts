@@ -94,7 +94,9 @@ export const causalEventSchema = z
     type: z.string().min(1),
     principal_id: z.string().regex(/^(agent|operator|system):.+$/, "principal_id must be authenticated"),
     recorded_at: z.string().regex(/^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d+)?(?:Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/, "recorded_at must be RFC3339"),
-    cause_event_ids: z.array(z.string().regex(/^(simfile|moltnet|mneme|daimon):.+$/)),
+    // B169 D4: cause namespaces are open reconciliation content. The closed
+    // event/emitter system list is deliberately not applied here.
+    cause_event_ids: z.array(z.string().regex(/^[^:]+:.+$/u)),
     payload: z.record(z.string(), z.unknown())
   })
   .strict()

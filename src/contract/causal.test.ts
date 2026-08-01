@@ -73,6 +73,18 @@ test("causalEventSchema rejects an unknown emitter.system", () => {
   assert.equal(result.success, false);
 });
 
+test("causalEventSchema accepts a foreign cause namespace unchanged", () => {
+  const event = { ...goldenMemoryRecalled(), cause_event_ids: ["driver:turn:7"] };
+  const result = validateCausalEvent(event);
+  assert.equal(result.success, true);
+  assert.deepEqual(result.success && result.data.cause_event_ids, ["driver:turn:7"]);
+});
+
+test("causalEventSchema rejects a bare cause id", () => {
+  const event = { ...goldenMemoryRecalled(), cause_event_ids: ["fixture-turn-1"] };
+  assert.equal(validateCausalEvent(event).success, false);
+});
+
 test("causalEventSchema rejects additional properties (strict envelope)", () => {
   const event = goldenMemoryRecalled();
   const broken = { ...event, unexpected_field: "nope" };
