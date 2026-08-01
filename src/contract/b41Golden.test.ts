@@ -27,7 +27,8 @@ const acceptedNames = [
   "accept-positive-1e-6-fixed", "accept-negative-1e-6-fixed", "accept-positive-1e-7-exponent", "accept-negative-1e-7-exponent",
   "accept-positive-below-1e-6", "accept-negative-below-1e-6", "accept-positive-above-1e-6", "accept-negative-above-1e-6",
   "accept-digest-domain-causal-event", "accept-digest-domain-exact-utf8", "accept-digest-domain-exact-bytes",
-  "accept-final-seq-zero", "accept-non-empty-final", "accept-multi-stream", "accept-nested-numeric-key-order"
+  "accept-final-seq-zero", "accept-non-empty-final", "accept-multi-stream", "accept-nested-numeric-key-order",
+  "accept-foreign-cause-namespace"
 ] as const;
 
 const rejectedNames = [
@@ -35,7 +36,7 @@ const rejectedNames = [
   "reject-unknown-event-emitter-field", "reject-unknown-final-top-level", "reject-unknown-final-emitter-field",
   "reject-unknown-digest-top-level", "reject-wrong-version-event", "reject-wrong-version-final", "reject-wrong-version-digest",
   "reject-malformed-event-id", "reject-unrecognized-event-id-system", "reject-mismatched-event-id-prefix",
-  "reject-unrecognized-cause-id", "reject-repeated-causes", "reject-duplicate-event-id", "reject-duplicate-stream-slot",
+  "reject-bare-cause-id", "reject-repeated-causes", "reject-duplicate-event-id", "reject-duplicate-stream-slot",
   "reject-present-cross-run-cause", "reject-duplicate-final", "reject-below-observed-final", "reject-empty-final-contradiction",
   "reject-unknown-digest-domain", "reject-altered-digest-hash", "reject-altered-digest-subject-bytes",
   "reject-altered-digest-output", "reject-duplicate-decoded-key", "reject-escaped-equivalent-keys", "reject-negative-zero",
@@ -143,10 +144,11 @@ const loadCorpus = async (): Promise<GoldenCase[]> => {
   });
 };
 
-test("B41 frozen corpus has the exact 19 accepted and 32 rejected cases", async () => {
+test("B41 frozen corpus matches the expected accepted and rejected inventories exactly", async () => {
   const corpus = await loadCorpus();
-  assert.equal(corpus.length, 51);
-  assert.equal(new Set(corpus.map((entry) => entry.name)).size, 51);
+  const expectedCount = acceptedNames.length + rejectedNames.length;
+  assert.equal(corpus.length, expectedCount);
+  assert.equal(new Set(corpus.map((entry) => entry.name)).size, expectedCount);
   assert.deepEqual(new Set(corpus.filter((entry) => entry.accept).map((entry) => entry.name)), new Set(acceptedNames));
   assert.deepEqual(new Set(corpus.filter((entry) => !entry.accept).map((entry) => entry.name)), new Set(rejectedNames));
   for (const entry of corpus) {
