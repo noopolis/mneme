@@ -54,5 +54,6 @@ export const schemaForModelToolName = (name: string) => {
   if (name === "memory_register") return registerInputSchema;
   if (name === "memory_summarize") return summarizeInputSchema;
   if (name === "memory_promote") return promoteInputSchema;
-  return forgetInputSchema;
+  if (name === "memory_forget") return forgetInputSchema;
+  throw new Error(`Unknown model tool name: ${name}`);
 };
