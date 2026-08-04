@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-kernel-kernel";
+
 import { JsonlMemoryStore } from "../store/store.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { createMemoryKernel } from "./kernel.js";

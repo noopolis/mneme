@@ -4,6 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-public-surface-integration";
+
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "test-public-surface-integration";
+});
+
 import {
   createMemoryRuntime,
   MNEME_RECALL_MODE_ENV,

@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+
+process.env.NOOPOLIS_RUN_ID = "test-kernel-mutations";
 import { createHash } from "node:crypto";
 
 import { JsonlMemoryStore } from "../store/store.js";

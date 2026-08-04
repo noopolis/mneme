@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-runtime-recall-mode";
+
 import { hashCanonicalJson } from "../contract/causal.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import { CausalEventStore } from "../store/causalStore.js";
