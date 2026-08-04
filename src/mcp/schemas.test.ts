@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerInputSchema, schemaForModelToolName } from "./schemas.js";
+import {
+  forgetInputSchema,
+  locateInputSchema,
+  promoteInputSchema,
+  registerInputSchema,
+  schemaForModelToolName,
+  searchInputSchema,
+  summarizeInputSchema
+} from "./schemas.js";
 
 const validRegister = {
   scope: "current",
@@ -20,7 +28,17 @@ test("B109 register schema binds provenance and rejects evidence or authority in
 });
 
 test("B109 every model tool schema is strict", () => {
-  for (const name of ["memory_search", "memory_locate", "memory_register", "memory_summarize", "memory_forget", "memory_promote"]) {
+  const schemas = {
+    memory_search: searchInputSchema,
+    memory_locate: locateInputSchema,
+    memory_register: registerInputSchema,
+    memory_summarize: summarizeInputSchema,
+    memory_forget: forgetInputSchema,
+    memory_promote: promoteInputSchema
+  } as const;
+  for (const [name, schema] of Object.entries(schemas)) {
+    assert.equal(schemaForModelToolName(name), schema);
     assert.equal(schemaForModelToolName(name).safeParse({ authority: "forged" }).success, false);
   }
+  assert.throws(() => schemaForModelToolName("memory_typo"), /memory_typo/u);
 });
