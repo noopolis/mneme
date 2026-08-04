@@ -100,8 +100,9 @@ test("resolveCausalRunId reads NOOPOLIS_RUN_ID from the given environment", () =
   assert.equal(resolveCausalRunId({ NOOPOLIS_RUN_ID: " run-abc " } as NodeJS.ProcessEnv), "run-abc");
 });
 
-test("resolveCausalRunId falls back to a stable placeholder when unset", () => {
-  assert.equal(resolveCausalRunId({} as NodeJS.ProcessEnv), "unset-run");
+test("resolveCausalRunId requires a non-blank NOOPOLIS_RUN_ID", () => {
+  assert.throws(() => resolveCausalRunId({} as NodeJS.ProcessEnv), /NOOPOLIS_RUN_ID must be set to a non-blank value/);
+  assert.throws(() => resolveCausalRunId({ NOOPOLIS_RUN_ID: "   " } as NodeJS.ProcessEnv), /NOOPOLIS_RUN_ID must be set to a non-blank value/);
 });
 
 test("mnemeCausalEventId and memoryStreamId produce the documented formats", () => {

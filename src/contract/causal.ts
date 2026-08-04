@@ -247,12 +247,15 @@ export const NOOPOLIS_RUN_ID_ENV = "NOOPOLIS_RUN_ID";
  * Resolves the shared run id every Noopolis authority stamps into its
  * causal events. Sourced from the `NOOPOLIS_RUN_ID` environment variable
  * (injected into every container by the root compiler), never from model
- * output. Falls back to a stable placeholder so standalone/local runs
- * (outside a compiled container) still produce schema-valid envelopes
- * instead of throwing.
+ * output. A causal event cannot be emitted without an explicit run id.
  */
-export const resolveCausalRunId = (env: NodeJS.ProcessEnv = process.env): string =>
-  env[NOOPOLIS_RUN_ID_ENV]?.trim() || "unset-run";
+export const resolveCausalRunId = (env: NodeJS.ProcessEnv = process.env): string => {
+  const value = env[NOOPOLIS_RUN_ID_ENV];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${NOOPOLIS_RUN_ID_ENV} must be set to a non-blank value`);
+  }
+  return value.trim();
+};
 
 export const memoryStreamId = (agentId: string): string => `memory:${agentId}`;
 

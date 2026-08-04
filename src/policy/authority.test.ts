@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-policy-authority";
+
 import { createMemoryAuthorityHandoff, snapshotMemoryToolCall } from "./authority.js";
 import { createMemoryKernel } from "../kernel/kernel.js";
 import { createMemoryRuntime, memoryAuthorityRuntimeId } from "../runtime/runtime.js";

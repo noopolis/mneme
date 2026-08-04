@@ -4,6 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+
+process.env.NOOPOLIS_RUN_ID = "test-kernel-mutation-identity";
 import { CausalEventStore } from "../store/causalStore.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { memoryScopeId } from "../identity/ids.js";

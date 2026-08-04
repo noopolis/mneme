@@ -14,6 +14,10 @@ import type { MemoryPrincipalRef, MemoryRuntime, MemoryToolCall } from "../contr
 
 const tempRoots: string[] = [];
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "test-runtime-runtime";
+});
+
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-memory-"));
   tempRoots.push(directory);
@@ -492,7 +496,7 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
     }
   } finally {
     if (previousRunId === undefined) {
-      delete process.env.NOOPOLIS_RUN_ID;
+      process.env.NOOPOLIS_RUN_ID = previousRunId ?? "test-runtime-runtime";
     } else {
       process.env.NOOPOLIS_RUN_ID = previousRunId;
     }
@@ -556,7 +560,7 @@ test("prepareTurn stamps a contiguous seq per (run_id, stream_id) across repeate
     assert.ok(seqs.length >= 2);
   } finally {
     if (previousRunId === undefined) {
-      delete process.env.NOOPOLIS_RUN_ID;
+      process.env.NOOPOLIS_RUN_ID = previousRunId ?? "test-runtime-runtime";
     } else {
       process.env.NOOPOLIS_RUN_ID = previousRunId;
     }
@@ -640,7 +644,7 @@ test("B70: memory.recalled stamps memory_id as the chain root, not the revision 
     assert.notEqual(recalled[0].payload.memory_id, recalled[0].payload.revision_id);
   } finally {
     if (previousRunId === undefined) {
-      delete process.env.NOOPOLIS_RUN_ID;
+      process.env.NOOPOLIS_RUN_ID = previousRunId ?? "test-runtime-runtime";
     } else {
       process.env.NOOPOLIS_RUN_ID = previousRunId;
     }
@@ -710,7 +714,7 @@ test("B70: off mode never reads memory, stamps zero memory.recalled, and gates k
     assert.equal(locateResult.content.length, 0);
   } finally {
     if (previousRunId === undefined) {
-      delete process.env.NOOPOLIS_RUN_ID;
+      process.env.NOOPOLIS_RUN_ID = previousRunId ?? "test-runtime-runtime";
     } else {
       process.env.NOOPOLIS_RUN_ID = previousRunId;
     }
@@ -795,7 +799,7 @@ test("B70: shuffled mode injects the other-scope decoy, never the on-mode select
     assert.equal(modeStamps[0].payload.degenerate, false);
   } finally {
     if (previousRunId === undefined) {
-      delete process.env.NOOPOLIS_RUN_ID;
+      process.env.NOOPOLIS_RUN_ID = previousRunId ?? "test-runtime-runtime";
     } else {
       process.env.NOOPOLIS_RUN_ID = previousRunId;
     }

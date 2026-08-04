@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-kernel-tool-contract";
+
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { runMemorySelection, recallableEvents } from "../runtime/support.js";

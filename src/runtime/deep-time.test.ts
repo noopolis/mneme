@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-runtime-deep-time";
+
 import { createMemoryRuntime } from "./runtime.js";
 import { createDeepTimeSession } from "./deep-time.js";
 import { JsonlMemoryStore } from "../store/store.js";

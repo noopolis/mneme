@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-kernel-evidence";
+
 import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryAuthorityHandoff, type MemoryAuthorityConfig } from "../policy/authority.js";
 import { CausalEventStore } from "../store/causalStore.js";
