@@ -4,11 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-mcp-server";
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { memoryScopeId } from "../identity/ids.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { getDreamMemoryToolInstructions } from "../contract/toolDescriptors.js";
 import { createMnemeMcpServer } from "./server.js";
 
 const tempRoots: string[] = [];
@@ -67,6 +70,7 @@ test("MCP server lists and calls Mneme memory tools through the protocol", async
   try {
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name).sort();
+    // Awake mode (the default): 5 tools, memory_promote is dream-only (C3).
     assert.deepEqual(toolNames, [
       "memory_forget",
       "memory_locate",
@@ -83,6 +87,42 @@ test("MCP server lists and calls Mneme memory tools through the protocol", async
     assert.equal(parsed.tool, "memory.search");
     assert.equal(parsed.audit.transport, "mcp");
     assert.ok(JSON.stringify(parsed.content).includes("MCP_MARKER"));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("MCP server registers dream-mode maintenance instructions for Mneme tools", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({
+    runtimeHomePath: root,
+    agentId: "luna",
+    mode: "dream"
+  });
+  const client = new Client({ name: "mneme-dream-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  try {
+    const tools = await client.listTools();
+    const dreamTools = tools.tools
+      .filter((tool) => tool.name.startsWith("memory_"))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    // Dream mode (C3): 6 tools — memory_promote is exposed only here.
+    assert.deepEqual(
+      dreamTools.map((tool) => tool.name),
+      ["memory_forget", "memory_locate", "memory_promote", "memory_register", "memory_search", "memory_summarize"]
+    );
+
+    const searchTool = dreamTools.find((tool) => tool.name === "memory_search");
+    assert.ok(searchTool);
+    const searchDescription = searchTool?.description ?? "";
+    assert.ok(searchDescription.includes("maintenance"));
+    assert.equal(searchDescription, getDreamMemoryToolInstructions()["memory.search"].description);
   } finally {
     await client.close();
     await server.close();
@@ -110,7 +150,6 @@ test("MCP register tool writes memories that search can read", async () => {
         content: { kind: "text", text: "REGISTERED_BY_MCP belongs to keeper." },
         visibility: "private",
         sensitivity: "normal",
-        evidence_event_ids: ["evt_external"],
         source_type: "mcp-test",
         confidence: 0.9
       }
@@ -124,6 +163,64 @@ test("MCP register tool writes memories that search can read", async () => {
     });
     const parsedSearch = JSON.parse(firstTextContent(result));
     assert.ok(JSON.stringify(parsedSearch.content).includes("REGISTERED_BY_MCP"));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("B45 MCP arguments cannot inject authority identity or scope grants", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({ runtimeHomePath: root, agentId: "keeper" });
+  const client = new Client({ name: "mneme-injection-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport); await client.connect(clientTransport);
+  try {
+    const result = await client.callTool({ name: "memory_register", arguments: {
+      scope: "current", kind: "text", content: { kind: "text", text: "MCP_AUTHORITY_INJECTION" }, visibility: "private",
+      sensitivity: "normal", source_type: "mcp-test",
+      principal: { agentId: "attacker", scope: "global" }, audience_key: "attacker", allowed_scopes: ["all"], capability: "mneme.cap.system.v1"
+    } });
+    assert.equal(result.isError, true);
+    const events = await new JsonlMemoryStore(root).read();
+    assert.equal(events.length, 0);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("MCP dream-mode memory_promote tool promotes a registered memory end to end", async () => {
+  const root = await tempDir();
+  const server = createMnemeMcpServer({
+    runtimeHomePath: root,
+    agentId: "keeper",
+    mode: "dream"
+  });
+  const client = new Client({ name: "mneme-promote-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  try {
+    const registered = await client.callTool({
+      name: "memory_register",
+      arguments: {
+        scope: "current",
+        kind: "text",
+        content: { kind: "text", text: "PROMOTE_CANDIDATE_MARKER belongs to keeper." },
+        visibility: "private",
+        sensitivity: "normal",
+        source_type: "mcp-test"
+      }
+    });
+    const parsedRegister = JSON.parse(firstTextContent(registered));
+    const memoryId = parsedRegister.content[0].event_ids[0];
+
+    const promoted = await client.callTool({
+      name: "memory_promote",
+      arguments: { scope: "current", memory_id: memoryId, reason: "reviewed in dream pass" }
+    });
+    const parsedPromote = JSON.parse(firstTextContent(promoted));
+    assert.equal(parsedPromote.decision, "allow_raw");
   } finally {
     await client.close();
     await server.close();

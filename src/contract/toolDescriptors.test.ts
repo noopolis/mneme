@@ -4,11 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-contract-tool-descriptors";
+
 import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
-import { createMemoryToolDescriptors } from "./toolDescriptors.js";
-import type { MemoryToolExecutionContext } from "./types.js";
+import { createMemoryAuthorityHandoff } from "../policy/authority.js";
+import {
+  createMemoryToolDescriptors,
+  createMemoryToolEnvelope,
+  getAwakeMemoryToolInstructions,
+  getDreamMemoryToolInstructions,
+  MEMORY_TOOLS_DREAM_SAFE,
+  MEMORY_TOOLS_AWAKE
+} from "./toolDescriptors.js";
+import type { MemoryKernel, MemoryToolCall, MemoryToolExecutionContext, MemoryToolResult } from "./types.js";
 
 const tempRoots: string[] = [];
 
@@ -44,13 +54,15 @@ test("tool descriptors expose provider-safe model names and execute through the 
   assert.ok(search);
   assert.equal(search.modelName, "memory_search");
   assert.equal(search.modelName.includes("."), false);
+  assert.equal(search.description, getAwakeMemoryToolInstructions()["memory.search"].description);
 
   const context: MemoryToolExecutionContext = {
-    wakeId: "wake-1",
+    wakeId: "daimon:wake-1",
     threadId: "noopolis:agora",
     principal,
     conversationScope: memoryScopeId(principal),
-    audienceKey: "agora"
+    audienceKey: "agora",
+    authority: runtime.authority
   };
   const result = await search.invoke({ scope: "current", query: "DESCRIPTOR_MARKER" }, context);
 
@@ -58,3 +70,113 @@ test("tool descriptors expose provider-safe model names and execute through the 
   assert.ok(result.content.some((entry) => entry.text?.includes("DESCRIPTOR_MARKER")));
 });
 
+test("createMemoryToolDescriptors supports dream mode with maintenance-focused instruction text", async () => {
+  const root = await tempDir();
+  const runtime = createMemoryRuntime({ agentId: "luna", runtimeHomePath: root });
+  const descriptors = createMemoryToolDescriptors(runtime.kernel, { mode: "dream" });
+  const names = descriptors.map((descriptor) => descriptor.name);
+
+  assert.deepEqual(names, [...MEMORY_TOOLS_DREAM_SAFE]);
+  assert.ok(MEMORY_TOOLS_DREAM_SAFE.includes("memory.search"));
+  assert.equal(descriptors[0]?.description, getDreamMemoryToolInstructions()["memory.search"].description);
+  assert.ok(descriptors[0]?.description.includes("maintenance"));
+});
+
+test("B109 register instructions bind provenance to the authenticated invocation", () => {
+  for (const instructions of [getAwakeMemoryToolInstructions(), getDreamMemoryToolInstructions()]) {
+    const register = instructions["memory.register"];
+    const text = [register.description, register.promptSnippet, ...register.promptGuidelines].join("\n");
+    assert.match(text, /authenticated invocation/);
+    assert.match(text, /attached automatically/);
+    assert.match(text, /Do not supply evidence ids or identity fields/);
+    assert.doesNotMatch(text, /explicit evidence/i);
+  }
+});
+
+test("C3: AWAKE stays 5 tools, DREAM_SAFE becomes 6 — memory.promote is dream-only", () => {
+  assert.equal(MEMORY_TOOLS_AWAKE.length, 5);
+  assert.equal(MEMORY_TOOLS_DREAM_SAFE.length, 6);
+  assert.equal((MEMORY_TOOLS_AWAKE as readonly string[]).includes("memory.promote"), false);
+  assert.ok(MEMORY_TOOLS_DREAM_SAFE.includes("memory.promote"));
+  for (const tool of MEMORY_TOOLS_AWAKE) {
+    assert.ok((MEMORY_TOOLS_DREAM_SAFE as readonly string[]).includes(tool), `dream must be a superset covering ${tool}`);
+  }
+});
+
+test("tool descriptors can be narrowed by options", async () => {
+  const root = await tempDir();
+  const runtime = createMemoryRuntime({ agentId: "luna", runtimeHomePath: root });
+  const descriptors = createMemoryToolDescriptors(runtime.kernel, {
+    mode: "dream",
+    toolNames: ["memory.search", "memory.forget"]
+  });
+
+  assert.deepEqual(
+    descriptors.map((descriptor) => descriptor.name),
+    ["memory.search", "memory.forget"]
+  );
+});
+
+test("tool envelopes preserve awake and dream modes", async () => {
+  let captured: MemoryToolCall | undefined;
+  const result: MemoryToolResult = {
+    request_id: "result",
+    tool: "memory.search",
+    decision: "allow_raw",
+    content: [],
+    audit: {
+      request_id: "result",
+      requester: { agentId: "luna", scope: "global" },
+      sources: [],
+      transport: "in_process",
+      latency_ms: 0
+    }
+  };
+  const kernel: MemoryKernel = {
+    async search(call) {
+      captured = call;
+      return result;
+    },
+    async locate() { return result; },
+    async register() { return result; },
+    async summarize() { return result; },
+    async forget() { return result; },
+    async promote() { return result; }
+  };
+  const [descriptor] = createMemoryToolDescriptors(kernel, { mode: "dream", toolNames: ["memory.search"] });
+  assert.ok(descriptor);
+
+  await descriptor.invoke({ scope: "current", query: "maintenance" }, {
+    mode: "dream",
+    wakeId: "wake-dream",
+    threadId: "dream:wake-dream-abc123",
+    principal: { agentId: "luna", scope: "global" },
+    conversationScope: "global",
+    audienceKey: "luna",
+    authority: createMemoryAuthorityHandoff({
+      secret: "descriptor-capture",
+      bankId: "luna",
+      runtimeId: "descriptor-test-runtime"
+    })
+  });
+
+  assert.equal(captured?.envelope.mode, "dream");
+  assert.equal(captured?.envelope.thread_id, "dream:wake-dream-abc123");
+});
+
+test("B45 execution contexts lower only finite current/global scope grants", () => {
+  const principal = { agentId: "luna", scope: "room" as const, qualifier: "noopolis:agora" };
+  const base: MemoryToolExecutionContext = {
+    wakeId: "daimon:wake-scopes",
+    threadId: "thread-scopes",
+    principal,
+    conversationScope: memoryScopeId(principal)
+  };
+  const current = memoryScopeId(principal);
+  const global = memoryScopeId({ agentId: principal.agentId, scope: "global" });
+  const envelope = createMemoryToolEnvelope({ ...base, allowedScopes: [current, global, current] });
+  assert.deepEqual(envelope.allowed_scopes, [current, global]);
+  assert.equal(envelope.allowed_scope_aliases.includes("all"), false);
+  assert.throws(() => createMemoryToolEnvelope({ ...base, allowedScopes: ["all"] }), /unrestricted scope/);
+  assert.throws(() => createMemoryToolEnvelope({ ...base, allowedScopeAliases: ["all"] }), /unrestricted all alias/);
+});

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { JsonlMemoryStore } from "./store.js";
 import { canonicalScopeKey } from "../identity/ids.js";
+import { type MemoryIndexEmbeddingQuery, rankEventsByEmbedding } from "./embeddingSearch.js";
 import type {
   MemoryEvent,
   MemoryEventType,
@@ -79,8 +80,48 @@ export class SQLiteMemoryIndex {
   }
 
   async query(input: MemoryIndexQuery): Promise<MemoryIndexSearchResult[]> {
-    const results = this.runQuery(input);
-    return results;
+    return this.runQuery(input);
+  }
+
+  async queryByEmbedding(input: MemoryIndexEmbeddingQuery): Promise<MemoryIndexSearchResult[]> {
+    const candidateLimit = Number.isFinite(input.limit ?? Number.NaN) && (input.limit ?? 0) > 0
+      ? Math.max(1, Math.floor(input.limit as number))
+      : 100;
+    const scored = await rankEventsByEmbedding(this.runQuery({
+      allowedScopes: input.allowedScopes,
+      tags: input.tags,
+      entities: input.entities,
+      types: input.types,
+      principalAgentId: input.principalAgentId,
+      principalScope: input.principalScope,
+      principalQualifier: input.principalQualifier,
+      limit: Math.max(candidateLimit * 5, 120)
+    }).map((entry) => entry.event), input.queryVector, input.embeddingProvider);
+    const start = Number.isFinite(input.offset ?? Number.NaN) && (input.offset ?? 0) > 0
+      ? Math.floor(input.offset as number)
+      : 0;
+    const effective = Math.max(1, Number.isFinite(input.limit ?? Number.NaN) && (input.limit ?? 0) > 0
+      ? Math.floor(input.limit as number)
+      : 100);
+    return scored.sort((left, right) => {
+      const scoreDelta = right.score - left.score;
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+
+      const timeDelta = Date.parse(right.event.createdAt) - Date.parse(left.event.createdAt);
+      if (timeDelta !== 0) {
+        return timeDelta;
+      }
+
+      const scopeDelta = left.event.scope.localeCompare(right.event.scope);
+      if (scopeDelta !== 0) {
+        return scopeDelta;
+      }
+
+      const idDelta = left.event.id.localeCompare(right.event.id);
+      return idDelta !== 0 ? idDelta : left.event.checksum.localeCompare(right.event.checksum);
+    }).slice(start, start + effective);
   }
 
   close(): void {
@@ -356,5 +397,4 @@ export class SQLiteMemoryIndex {
   }
 }
 
-export const createMemoryIndex = (options: SQLiteIndexConfig): SQLiteMemoryIndex =>
-  new SQLiteMemoryIndex(options);
+export const createMemoryIndex = (options: SQLiteIndexConfig): SQLiteMemoryIndex => new SQLiteMemoryIndex(options);

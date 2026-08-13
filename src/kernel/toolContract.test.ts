@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-kernel-tool-contract";
+
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { runMemorySelection, recallableEvents } from "../runtime/support.js";
@@ -67,28 +69,30 @@ const seedMemoryEvent = (
   } satisfies MemoryEventInput);
 
 const memoryToolCall = (
+  runtime: ReturnType<typeof createMemoryRuntime>,
   tool: MemoryToolCall["tool"],
   requester: MemoryPrincipalRef,
   args: Record<string, unknown>
-): MemoryToolCall => ({
-  request_id: `${tool}-contract-test`,
-  tool,
-  arguments: args,
-  envelope: {
-    version: "mneme.memory.tool.v1",
-    wake_id: "contract-wake",
+): MemoryToolCall => {
+  const request_id = `${tool}-contract-test:${Date.now()}:${Math.random()}`;
+  const envelope = {
+	    version: "mneme.memory.tool.v1",
+	    mode: "awake",
+	    wake_id: "daimon:contract-wake",
     thread_id: "contract-thread",
     principal: requester,
     conversation_scope: requester.qualifier ?? requester.scope,
     audience_key: "contract-test",
     policy_version: "test",
-    allowed_scope_aliases: ["current", "global", "current_room", "current_pair", "current_task"],
+	    allowed_scope_aliases: ["all", "current", "global", "current_room", "current_pair", "current_task"],
     transport: "in_process",
-    nonce: "contract-test",
+    nonce: request_id,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     capability: "memory"
-  }
-});
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  return { request_id, tool, arguments: args, envelope: { ...envelope, authority: runtime.authority.issue({ request_id, tool, arguments: args, envelope }) } };
+};
 
 test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -190,7 +194,7 @@ test("locate returns candidate handles without private content", async () => {
   assert.equal(publicChoice?.decision, "allow_raw");
   assert.ok(publicChoice?.representation.includes("PUBLIC_LOCATE_MARKER"));
 
-  const location = await runtime.kernel.locate(memoryToolCall("memory.locate", publicPrincipal, {
+  const location = await runtime.kernel.locate(memoryToolCall(runtime, "memory.locate", publicPrincipal, {
     query: "council agenda rotate",
     limit: 2
   }));
@@ -232,7 +236,7 @@ test("register + forget keeps recall boundary-safe by suppressing forgotten evid
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "wake-forget",
+    eventId: "daimon:wake-forget",
     kind: "manual",
     text: "What old plan did we forget?",
     context: {
@@ -267,7 +271,7 @@ test("activity tool summaries do not leak tool payload text", async () => {
     rawHint: "tool-check"
   };
   const request = {
-    eventId: "wake-tool-boundary",
+    eventId: "daimon:wake-tool-boundary",
     kind: "message" as const,
     from: "orchestrator",
     text: "Can you inspect private pair and room context?",

@@ -18,6 +18,9 @@ const annotationsFor = (name: string): ToolAnnotations => {
   if (name === "memory_forget") {
     return { destructiveHint: true, openWorldHint: false };
   }
+  if (name === "memory_promote") {
+    return { destructiveHint: false, openWorldHint: false };
+  }
   return { openWorldHint: false };
 };
 
@@ -33,10 +36,10 @@ export const createMnemeMcpServer = (config: MnemeMcpServerConfig): McpServer =>
   const resolved = resolveMnemeMcpConfig(config);
   const server = new McpServer({
     name: "mneme",
-    version: "0.1.0"
+    version: "0.1.1"
   });
 
-  for (const descriptor of createMemoryToolDescriptors(resolved.runtime.kernel)) {
+  for (const descriptor of createMemoryToolDescriptors(resolved.runtime.kernel, { mode: resolved.mode })) {
     server.registerTool(
       descriptor.modelName,
       {

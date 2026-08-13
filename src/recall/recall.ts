@@ -15,7 +15,20 @@ export interface RecallInput {
   events: MemoryEvent[];
   query: string;
   maxTokens: number;
+  embeddingScores?: Readonly<Record<string, number>> | ReadonlyMap<string, number>;
 }
+
+const getEmbeddingScore = (embeddingScores: RecallInput["embeddingScores"], eventId: string): number => {
+  if (!embeddingScores) {
+    return 0;
+  }
+
+  if (embeddingScores instanceof Map) {
+    return embeddingScores.get(eventId) ?? 0;
+  }
+
+  return (embeddingScores as Readonly<Record<string, number>>)[eventId] ?? 0;
+};
 
 export interface RecallSelection {
   packet: MemoryPacket;
@@ -55,7 +68,7 @@ const buildRepresentation = (decision: MemoryDecision, event: MemoryEvent): stri
     return summary.length < base.length ? `${summary}...` : summary;
   }
   if (decision === "allow_redacted_summary") {
-    return `[redacted] ${base.slice(0, 100)}...`;
+    return "Memory is available only in redacted form.";
   }
   if (decision === "known_but_private") {
     return "Related private context is available behind policy.";
@@ -63,7 +76,13 @@ const buildRepresentation = (decision: MemoryDecision, event: MemoryEvent): stri
   return "Memory was blocked by policy.";
 };
 
-const scoreEvent = (actor: MemoryPrincipalRef, candidateScope: string, event: MemoryEvent, queryText: string): number => {
+const scoreEvent = (
+  actor: MemoryPrincipalRef,
+  candidateScope: string,
+  event: MemoryEvent,
+  queryText: string,
+  input?: Pick<RecallInput, "embeddingScores">
+): number => {
   const text = textFromEvent(event).toLowerCase();
   const overlap = queryText
     .split(" ")
@@ -73,7 +92,8 @@ const scoreEvent = (actor: MemoryPrincipalRef, candidateScope: string, event: Me
 
   const scopeScore = memoryPriority(actor, candidateScope ? { ...event.principal, scope: event.principal.scope } : event.principal);
   const freshness = Date.parse(event.createdAt) / 1000_000;
-  return overlap + scopeScore + (freshness % 30_000) / 1000;
+  const embeddingScore = input ? getEmbeddingScore(input.embeddingScores, event.id) : 0;
+  return overlap + scopeScore + (freshness % 30_000) / 1000 + embeddingScore * 100;
 };
 
 export const rankCandidates = (input: RecallInput): Array<{ event: MemoryEvent; decision: MemoryDecision; score: number; representation: string; scope: string } > => {
@@ -102,7 +122,7 @@ export const rankCandidates = (input: RecallInput): Array<{ event: MemoryEvent; 
       event,
       decision: policy.decision,
       scope: event.scope,
-      score: scoreEvent(input.actor, event.scope, event, query),
+      score: scoreEvent(input.actor, event.scope, event, query, input),
       representation
     });
   }

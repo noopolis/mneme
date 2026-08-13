@@ -1,13 +1,20 @@
+import type { MemoryOrigin } from "./lifecycleTypes.js";
+
+export * from "./lifecycleTypes.js";
+
 export interface MemoryPrincipalRef {
   agentId: string;
   scope: "global" | "team" | "room" | "pair" | "task" | "role" | "artifact";
   qualifier?: string;
 }
 
-export type MemoryWakeKind = "manual" | "message" | "schedule";
+export type MemoryWakeKind = "manual" | "message" | "schedule" | "dream";
+
+export type MemoryWakeMode = "awake" | "dream";
 
 export interface MemoryToolCallEnvelope {
   version: "mneme.memory.tool.v1";
+  mode: MemoryWakeMode;
   wake_id: string;
   thread_id: string;
   principal: MemoryPrincipalRef;
@@ -15,13 +22,17 @@ export interface MemoryToolCallEnvelope {
   audience_key: string;
   policy_version: string;
   allowed_scope_aliases: ReadonlyArray<
-    "current" | "global" | "public_profile" | "public_facts" |
-    "current_room" | "current_pair" | "current_task"
+	    "all" | "current" | "global" | "public_profile" | "public_facts" |
+	    "current_room" | "current_pair" | "current_task"
   >;
+  /** Finite canonical scopes minted by the trusted adapter for this turn. */
+  allowed_scopes?: ReadonlyArray<string>;
   transport: "in_process" | "mcp" | "protocol" | "text_loop";
   nonce: string;
   expires_at: string;
   capability: string;
+  /** HMAC handoff issued by a trusted adapter; model arguments never supply it. */
+  authority?: string;
 }
 
 export type MemoryToolName =
@@ -30,7 +41,8 @@ export type MemoryToolName =
   | "memory.register"
   | "memory.write"
   | "memory.summarize"
-  | "memory.forget";
+  | "memory.forget"
+  | "memory.promote";
 
 export type MemoryExecutableToolName = Exclude<MemoryToolName, "memory.write">;
 
@@ -39,9 +51,11 @@ export type MemoryModelToolName =
   | "memory_locate"
   | "memory_register"
   | "memory_summarize"
-  | "memory_forget";
+  | "memory_forget"
+  | "memory_promote";
 
 export interface MemoryToolExecutionContext {
+  mode?: MemoryWakeMode;
   wakeId: string;
   threadId: string;
   principal: MemoryPrincipalRef;
@@ -49,10 +63,18 @@ export interface MemoryToolExecutionContext {
   audienceKey?: string;
   policyVersion?: string;
   allowedScopeAliases?: MemoryToolCallEnvelope["allowed_scope_aliases"];
+  /** Exact finite scopes minted by the trusted adapter for this turn. */
+  allowedScopes?: ReadonlyArray<string>;
   transport?: MemoryToolCallEnvelope["transport"];
   expiresAt?: string;
   nonce?: string;
   capability?: string;
+  /** Trusted adapter-owned signer. Absence fails closed at the descriptor boundary. */
+  authority?: {
+    readonly bankId: string;
+    readonly runtimeId: string;
+    issue(call: Omit<MemoryToolCall, "envelope"> & { envelope: Omit<MemoryToolCallEnvelope, "authority"> }): string;
+  };
 }
 
 export interface MemoryToolCall {
@@ -135,10 +157,10 @@ export interface MemoryRegisterArguments {
   content: MemoryContent;
   visibility: MemoryVisibility;
   sensitivity: MemorySensitivity;
-  evidence_event_ids: string[];
   source_type: string;
   confidence?: number;
-  principal?: MemoryPrincipalRef;
+  /** When set, register this as a new revision of an existing memory chain. */
+  memory_id?: string;
 }
 
 export interface MemorySummarizeArguments {
@@ -158,6 +180,7 @@ export interface MemoryKernel {
   register(call: MemoryToolCall): Promise<MemoryToolResult>;
   summarize(call: MemoryToolCall): Promise<MemoryToolResult>;
   forget(call: MemoryToolCall): Promise<MemoryToolResult>;
+  promote(call: MemoryToolCall): Promise<MemoryToolResult>;
 }
 
 export interface MemoryToolDescriptor {
@@ -185,7 +208,9 @@ export type MemoryEventType =
   | "memory.recalled"
   | "memory.located"
   | "memory.denied"
-  | "memory.forgotten";
+  | "memory.forgotten"
+  | "memory.promoted"
+  | "memory.consolidated";
 
 export type MemoryContent =
   | { kind: "text"; text: string }
@@ -210,6 +235,14 @@ export interface MemoryEvent {
   ttl?: string;
   parentEventIds: string[];
   checksum: string;
+  /** Store-assigned monotonic sequence (bootstrapped from disk; legacy lines get a read-time 1-based line-order seq). */
+  seq: number;
+  /** Event id of the chain's first content event. Absent means this event is its own root. */
+  memoryId?: string;
+  /** Kernel-stamped from the validated capability, never from model input. */
+  origin?: MemoryOrigin;
+  /** memory.consolidated marker payload: the ledger seq snapshot at dream-pass start. */
+  highWaterSeq?: number;
 }
 
 export interface MemoryEventInput {
@@ -225,6 +258,9 @@ export interface MemoryEventInput {
   confidence?: number;
   ttl?: string;
   parentEventIds?: string[];
+  memoryId?: string;
+  origin?: MemoryOrigin;
+  highWaterSeq?: number;
 }
 
 export type MemoryDecision =
@@ -298,9 +334,25 @@ export interface MemoryRecallRequest {
 
 export interface MemoryPrepareTurnResult {
   principal: MemoryPrincipalRef;
+  /** Exact finite scopes resolved by Mneme for this trusted turn. */
+  readonly allowedScopes: ReadonlyArray<string>;
   packet: MemoryPacket;
   promptText: string;
   recall: MemoryRecallAudit;
+  /**
+   * The `event_id` (`mneme:<uuid>`, see contract/causal.ts
+   * `mnemeCausalEventId`) of each `memory.recalled` causal event this
+   * `prepareTurn` call actually appended to `causal.jsonl` — one per entry
+   * in `recall.selectedEventIds`, same order. `recall.selectedEventIds`
+   * are the raw kernel-log recall ids (`evt_<...>`), a different id
+   * namespace than the causal event stream every authority (moltnet,
+   * daimon, mneme) stamps its own events under; callers that chain
+   * `cause_event_ids` across authorities (see `@noopolis/daimon`
+   * `stampTurnInputSubmitted`) must reference the ids here, not
+   * `recall.selectedEventIds`, or the reconciler can never resolve the
+   * cause link back to mneme's own `memory.recalled` events.
+   */
+  recalledCausalEventIds: string[];
 }
 
 export interface MemoryTurnRecord {
@@ -318,4 +370,6 @@ export interface MemoryRuntime {
   prepareTurn(request: MemoryRecallRequest): Promise<MemoryPrepareTurnResult>;
   recordTurn(input: MemoryTurnRecord): Promise<void>;
   kernel: MemoryKernel;
+  /** Adapter seam for descriptor/MCP calls; it is not model-facing input. */
+  authority: NonNullable<MemoryToolExecutionContext["authority"]>;
 }

@@ -95,7 +95,7 @@ export const memoryPolicy = ({ request, candidate }: MemoryPolicyInput): {
   if (visible === "pair") {
     return isPairMatch(request, candidate.principal, visible)
       ? {
-        decision: sensitive === "secret" ? "allow_summary" : "allow_raw",
+        decision: sensitive === "secret" ? "allow_redacted_summary" : "allow_raw",
         reason: "pair scope match"
       }
       : {
@@ -107,15 +107,10 @@ export const memoryPolicy = ({ request, candidate }: MemoryPolicyInput): {
   if (
     visible === "team" &&
     candidate.principal.scope === "team" &&
-    request.agentId === candidate.principal.agentId &&
+    teamMatch(request, candidate.principal) &&
     eventScopeMatchesPrincipal(candidate)
   ) {
-    if (sensitive === "secret") {
-      return {
-        decision: "allow_summary",
-        reason: "team scope match with sensitive visibility"
-      };
-    }
+    if (sensitive === "secret") return { decision: "allow_redacted_summary", reason: "secret team memory" };
     return {
       decision: "allow_summary",
       reason: "team scope match"
@@ -125,7 +120,7 @@ export const memoryPolicy = ({ request, candidate }: MemoryPolicyInput): {
   if (
     visible === "room" &&
     candidate.principal.scope === "room" &&
-    request.agentId === candidate.principal.agentId &&
+    roomMatch(request, candidate.principal) &&
     eventScopeMatchesPrincipal(candidate)
   ) {
     if (sensitive === "secret") {
@@ -141,6 +136,7 @@ export const memoryPolicy = ({ request, candidate }: MemoryPolicyInput): {
   }
 
   if (visible === "global" && candidate.principal.scope === "global") {
+    if (sensitive === "secret") return { decision: "allow_redacted_summary", reason: "secret global memory" };
     return {
       decision: "allow_summary",
       reason: "global visibility"
@@ -148,6 +144,7 @@ export const memoryPolicy = ({ request, candidate }: MemoryPolicyInput): {
   }
 
   if (visible === "public") {
+    if (sensitive === "secret") return { decision: "deny", reason: "secret memory cannot be public" };
     return {
       decision: "allow_summary",
       reason: "public visibility"

@@ -4,10 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-runtime-deep-time";
+
 import { createMemoryRuntime } from "./runtime.js";
+import { createDeepTimeSession } from "./deep-time.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { memoryScopeId } from "../identity/ids.js";
-import type { MemoryPrincipalRef, MemoryVisibility, MemoryEventInput, MemoryToolCall } from "../contract/types.js";
+import type { MemoryPrincipalRef, MemoryVisibility, MemoryEventInput, MemoryToolCall, MemoryRuntime } from "../contract/types.js";
 
 const tempRoots: string[] = [];
 
@@ -75,28 +78,30 @@ const harness = async (agentId: string) => {
 };
 
 const toolCall = (
+  runtime: MemoryRuntime,
   tool: MemoryToolCall["tool"],
   requester: MemoryPrincipalRef,
   args: Record<string, unknown>
-): MemoryToolCall => ({
-  request_id: `${tool}-deep-time`,
-  tool,
-  arguments: args,
-  envelope: {
-    version: "mneme.memory.tool.v1",
-    wake_id: "deep-time-wake",
+): MemoryToolCall => {
+  const request_id = `${tool}-deep-time:${Date.now()}:${Math.random()}`;
+  const envelope = {
+	    version: "mneme.memory.tool.v1",
+	    mode: "awake",
+	    wake_id: "daimon:deep-time-wake",
     thread_id: "deep-time-thread",
     principal: requester,
     conversation_scope: requester.qualifier ?? requester.scope,
     audience_key: "deep-time",
     policy_version: "test",
-    allowed_scope_aliases: ["current", "global", "current_room", "current_pair", "current_task"],
+	    allowed_scope_aliases: ["all", "current", "global", "current_room", "current_pair", "current_task"],
     transport: "in_process",
-    nonce: "deep-time",
+    nonce: request_id,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     capability: "memory"
-  }
-});
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  return { request_id, tool, arguments: args, envelope: { ...envelope, authority: runtime.authority.issue({ request_id, tool, arguments: args, envelope }) } };
+};
 
 test("room A stays isolated from room B and private B memory in a shared identity", async () => {
   const { store, runtime } = await harness("luna");
@@ -118,7 +123,7 @@ test("room A stays isolated from room B and private B memory in a shared identit
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "evt-room-a",
+    eventId: "daimon:evt-room-a",
     kind: "manual",
     text: "report the current status for room A",
     context: {
@@ -148,7 +153,7 @@ test("a pair selflet can recall its own private memory raw", async () => {
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "evt-pair-a",
+    eventId: "daimon:evt-pair-a",
     kind: "manual",
     from: "lens-steward",
     text: "recall the private note",
@@ -173,19 +178,13 @@ test("cross-self locate returns an opaque handle without private content", async
     text: "orbit delta is the hidden deployment secret"
   });
 
-  const result = await runtime.kernel.locate(toolCall("memory.locate", principal("luna", "pair", "lens-steward"), {
+  const result = await runtime.kernel.locate(toolCall(runtime, "memory.locate", principal("luna", "pair", "lens-steward"), {
     query: "orbit delta",
     limit: 3
   }));
 
-  assert.equal(result.decision, "locate_only");
-  assert.equal(result.content.length, 1);
-
-  const [handle] = result.content;
-  assert.equal(handle.principal?.qualifier, "lens-architect");
-  assert.equal(handle.text, undefined);
-  assert.equal(handle.event_ids.length, 0);
-  assert.ok(!JSON.stringify(handle).includes("hidden deployment secret"));
+  assert.equal(result.decision, "deny");
+  assert.equal(result.content.length, 0);
 });
 
 test("room recall includes global identity memory without leaking another organization room", async () => {
@@ -208,7 +207,7 @@ test("room recall includes global identity memory without leaking another organi
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "wake-org-a",
+    eventId: "daimon:wake-org-a",
     kind: "schedule",
     text: "Continue the strategy plan.",
     context: {
@@ -232,25 +231,20 @@ test("private selflet memory is hinted across scopes and raw only inside its pai
     text: "SELFLET_RAW_MARKER org-b knows the migration password changed."
   });
 
-  const roomLocateResult = await runtime.kernel.locate(toolCall("memory.locate", principal("athena", "room", "org-a:strategy"), {
+  const roomLocateResult = await runtime.kernel.locate(toolCall(runtime, "memory.locate", principal("athena", "room", "org-a:strategy"), {
     query: "migration password",
     limit: 2
   }));
 
-  assert.equal(roomLocateResult.content.length, 1);
-  assert.equal(roomLocateResult.decision, "locate_only");
-  assert.equal(roomLocateResult.content[0].principal?.qualifier, "athena-org-b");
-  assert.equal(roomLocateResult.content[0].text, undefined);
-  assert.equal(JSON.stringify(roomLocateResult.content[0]).includes("SELFLET_RAW_MARKER"), false);
+  assert.equal(roomLocateResult.content.length, 0);
+  assert.equal(roomLocateResult.decision, "deny");
 
   const pairTurn = await runtime.prepareTurn({
-    eventId: "wake-pair",
+    eventId: "daimon:wake-pair",
     kind: "message",
     from: "athena-org-b",
     text: "What does the org-b selflet know about migration password?",
     context: {
-      networkId: "org-a",
-      roomId: "strategy",
       from: "athena-org-b",
       pairPeers: ["athena-org-b"]
     }
@@ -272,7 +266,7 @@ test("sealed memories never leak and locate returns no handle", async () => {
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "wake-sealed",
+    eventId: "daimon:wake-sealed",
     kind: "schedule",
     text: "Do we know anything about SEALED_MARKER?",
     context: {
@@ -291,7 +285,7 @@ test("sealed memories never leak and locate returns no handle", async () => {
   assert.ok(prepareAudit);
   assert.equal(JSON.stringify(prepareAudit.content).includes("SEALED_MARKER this should never appear"), false);
 
-  const locateResult = await runtime.kernel.locate(toolCall("memory.locate", principal("athena", "global"), {
+  const locateResult = await runtime.kernel.locate(toolCall(runtime, "memory.locate", principal("athena", "global"), {
     query: "SEALED_MARKER",
     limit: 4
   }));
@@ -318,7 +312,7 @@ test("schedule wakes do not implicitly load private pair memory", async () => {
   });
 
   const turn = await runtime.prepareTurn({
-    eventId: "wake-schedule",
+    eventId: "daimon:wake-schedule",
     kind: "schedule",
     text: "Review the room without interrupting private pair channels.",
     context: {
@@ -342,7 +336,7 @@ test("locate records provenance audit without disclosing content", async () => {
     text: "ROOM_SUMMARY_MARKER the blue path needs a dry run."
   });
 
-  const result = await runtime.kernel.locate(toolCall("memory.locate", principal("athena", "room", "org-a:strategy"), {
+  const result = await runtime.kernel.locate(toolCall(runtime, "memory.locate", principal("athena", "room", "org-a:strategy"), {
     query: "blue path dry run",
     limit: 2
   }));
@@ -358,4 +352,87 @@ test("locate records provenance audit without disclosing content", async () => {
   assert.equal(audit.content.kind, "text");
   assert.ok(audit.content.text.includes("Located"));
   assert.equal(audit.content.text.includes("ROOM_SUMMARY_MARKER"), false);
+});
+
+// B3/B4 — createDeepTimeSession's transactional high-water-mark rule -------
+
+test("B3: awake writes dirty a scope; committing a consolidation pass clears it; a mid-pass awake write stays dirty", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "first awake fact"
+  });
+
+  const dirtyBefore = await session.selectDirtyScopes();
+  const scopeEntry = dirtyBefore.find((entry) => entry.scope === memoryScopeId(principal("luna", "global")));
+  assert.ok(scopeEntry, "scope with an awake write must be dirty");
+  assert.equal(scopeEntry?.newContentCount, 1);
+
+  const scope = memoryScopeId(principal("luna", "global"));
+  const consolidation = await session.beginConsolidation(scope);
+  assert.ok(consolidation.highWaterSeq > 0);
+
+  // Mid-pass: a new awake write lands with a seq past the snapshot.
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "second awake fact written during the pass"
+  });
+
+  await consolidation.commit(["evt_consolidation_output"]);
+
+  const dirtyAfter = await session.selectDirtyScopes();
+  const scopeAfter = dirtyAfter.find((entry) => entry.scope === scope);
+  assert.ok(scopeAfter, "the mid-pass write must keep the scope dirty even after commit");
+  assert.equal(scopeAfter?.newContentCount, 1);
+  assert.equal(scopeAfter?.lastConsolidatedSeq, consolidation.highWaterSeq);
+});
+
+test("B3: a scope with no writes after the marker is clean", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+  const scope = memoryScopeId(principal("luna", "global"));
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "only awake fact"
+  });
+
+  const consolidation = await session.beginConsolidation(scope);
+  await consolidation.commit([]);
+
+  const dirtyAfter = await session.selectDirtyScopes();
+  assert.equal(dirtyAfter.some((entry) => entry.scope === scope), false);
+});
+
+test("B4: crash-sim — if commit() never runs, the scope stays dirty and a rerun is safe (no duplicate marker)", async () => {
+  const { store } = await harness("luna");
+  const session = createDeepTimeSession(store);
+  const scope = memoryScopeId(principal("luna", "global"));
+
+  await seedText(store, {
+    principal: principal("luna", "global"),
+    visibility: "global",
+    text: "fact before the simulated crash"
+  });
+
+  // Simulate a crash: beginConsolidation ran, but commit() never did.
+  await session.beginConsolidation(scope);
+
+  const dirtyAfterCrash = await session.selectDirtyScopes();
+  assert.ok(dirtyAfterCrash.some((entry) => entry.scope === scope), "no marker was written, so the scope must still be dirty");
+
+  // Rerun: begin again and this time commit — must be idempotent-safe.
+  const rerun = await session.beginConsolidation(scope);
+  await rerun.commit(["evt_rerun_output"]);
+
+  const dirtyAfterRerun = await session.selectDirtyScopes();
+  assert.equal(dirtyAfterRerun.some((entry) => entry.scope === scope), false);
+
+  const markers = (await store.read({ scope, types: ["memory.consolidated"] }));
+  assert.equal(markers.length, 1, "the crashed pass must not have left a stray marker");
 });

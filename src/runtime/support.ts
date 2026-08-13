@@ -2,6 +2,7 @@ import { memoryScopeId } from "../identity/ids.js";
 import { memoryPolicy } from "../policy/policy.js";
 import { runRecall } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { projectLifecycle } from "../store/lifecycle.js";
 import type {
   MemoryDecision,
   MemoryEvent,
@@ -71,19 +72,46 @@ export const readByScopes = async (
   return events;
 };
 
-export const recallableEvents = (events: MemoryEvent[]): MemoryEvent[] => {
-  const forgotten = new Set(
-    events
-      .filter((event) => event.type === "memory.forgotten")
-      .flatMap((event) => event.parentEventIds)
-  );
+const isHeadTtlExpired = (createdAt: string, ttl: string | undefined, now: number): boolean => {
+  if (!ttl) {
+    return false;
+  }
+  const ttlMs = Number(ttl);
+  const createdAtMs = Date.parse(createdAt);
+  if (!Number.isFinite(ttlMs) || !Number.isFinite(createdAtMs)) {
+    return false;
+  }
+  return now >= createdAtMs + ttlMs;
+};
 
-  return events.filter((event) =>
-    event.type !== "memory.located" &&
-    event.type !== "memory.denied" &&
-    event.type !== "memory.forgotten" &&
-    !forgotten.has(event.id)
-  );
+/**
+ * B59: rewritten over the lifecycle projection (src/store/lifecycle.ts).
+ * Returns only each memory chain's current head event when that head is
+ * active or promoted and not TTL-expired — superseded revisions, forgotten
+ * chains, and audit-only events (recalled/located/denied) never come back
+ * out. Name kept stable for existing callers (prepareTurn, kernel search
+ * helpers via toolContract tests).
+ */
+export const recallableEvents = (events: MemoryEvent[]): MemoryEvent[] => {
+  const projection = projectLifecycle(events);
+  const eventsById = new Map(events.map((event) => [event.id, event]));
+  const now = Date.now();
+
+  const result: MemoryEvent[] = [];
+  for (const head of projection.heads.values()) {
+    if (head.state !== "active" && head.state !== "promoted") {
+      continue;
+    }
+    if (isHeadTtlExpired(head.createdAt, head.ttl, now)) {
+      continue;
+    }
+    const event = eventsById.get(head.revisionId);
+    if (event) {
+      result.push(event);
+    }
+  }
+
+  return result;
 };
 
 export const deniedMemoryEvents = (input: {
@@ -112,13 +140,15 @@ export const buildRecallInput = (input: {
   events: MemoryEvent[];
   text: string;
   maxTokens?: number;
+  embeddingScores?: Readonly<Record<string, number>> | ReadonlyMap<string, number>;
 }): ReturnType<typeof runRecall> => {
   return runRecall({
     actor: input.actor,
     scopeIds: input.scopeIds,
     events: input.events,
     query: input.text,
-    maxTokens: clampTokenBudget(input.maxTokens)
+    maxTokens: clampTokenBudget(input.maxTokens),
+    embeddingScores: input.embeddingScores
   });
 };
 
@@ -136,7 +166,7 @@ const toDecisionText = (decision: MemoryDecision): string => {
 const memoryTagsFromRequest = (
   request: MemoryRecallRequest,
   packet: MemoryPacket,
-  result: MemoryPrepareTurnResult
+  result: Pick<MemoryPrepareTurnResult, "principal">
 ): string[] => {
   const context = request.context ?? {};
   const tokens = [
@@ -203,12 +233,7 @@ export const buildDecisionEvents = (input: {
     ...extractTokens(input.packet.principal.scope)
   ];
 
-  const tags = memoryTagsFromRequest(input.request, input.packet, {
-    principal: input.principal,
-    packet: input.packet,
-    promptText: input.outputText,
-    recall: input.recall
-  });
+  const tags = memoryTagsFromRequest(input.request, input.packet, { principal: input.principal });
 
   const base = baseEventInput({
     principal: input.principal,

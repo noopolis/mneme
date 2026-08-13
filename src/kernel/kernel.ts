@@ -1,55 +1,171 @@
 import { JsonlMemoryStore } from "../store/store.js";
-import { memoryPolicy } from "../policy/policy.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
-import { runRecall } from "../recall/recall.js";
+import { CausalEventStore } from "../store/causalStore.js";
+import { appendToolOutcomeEvent, appendToolRequestEvent } from "../store/causalStore.js";
+import type { MemoryEmbeddingProvider } from "../store/embedding.js";
+import { memoryPolicy } from "../policy/policy.js";
+import { MemoryAuthorityGuard, snapshotMemoryToolCall, type MemoryAuthorityConfig } from "../policy/authority.js";
+import { createHash } from "node:crypto";
+import { resolveCausalRunId } from "../contract/causal.js";
 import type {
   MemoryEventInput,
   MemoryKernel,
   MemoryToolCall,
+  MemoryToolName,
   MemoryToolResult
 } from "../contract/types.js";
 import {
   CandidateHandle,
   asNumber,
+  canExposeEventId,
   collectTombstones,
   hasInvalidV1Envelope,
   decide,
   eventText,
-  isForgetArguments,
   isLocateArguments,
-  isRegisterArguments,
   isRecallableMemoryEvent,
   isSearchArguments,
-  isSummarizeArguments,
+  hashArgumentsForEvidence,
   makeAudit,
-  matchesQuery,
   makeLocateResult,
   makeSearchResult,
   malformed,
   unavailable,
-  policyText,
   resolveScope,
   locateCandidateId,
   sanitizePrincipal,
 } from "./support.js";
+import { prepareSearchCandidates } from "./search.js";
+import { forgetMemory, promoteMemory, registerMemory, summarizeMemory } from "./mutations.js";
+import {
+  malformedUntrustedToolCall,
+  unavailableUntrustedToolCall,
+  UNTRUSTED_ARGUMENT_SHA256,
+  UNTRUSTED_REQUEST_SHA256
+} from "./untrusted.js";
 
 export interface MemoryKernelConfig {
   runtimeHomePath: string;
   source?: string;
+  embeddingProvider?: MemoryEmbeddingProvider;
+  /**
+   * B62: the causal store the four mutating tools append `memory.write.denied`
+   * events to. Callers that already own a CausalEventStore against this same
+   * runtimeHomePath (e.g. JsonlMemoryRuntime) MUST pass it here rather than
+   * letting the kernel mint its own — two independent CausalEventStore
+   * instances against the same causal.jsonl would each bootstrap their own
+   * in-memory per-stream seq counter and could stamp colliding seqs.
+   */
+  causalStore?: CausalEventStore;
+  /** A deployment-owned HMAC verifier. Omission is explicitly fail-closed. */
+  authority?: MemoryAuthorityConfig;
 }
 
 export class JsonlMemoryKernel implements MemoryKernel {
   private readonly store: JsonlMemoryStore;
   private readonly index;
+  private readonly causalStore: CausalEventStore;
   private readonly source: string;
+  private readonly embeddingProvider?: MemoryEmbeddingProvider;
+  private readonly authority: MemoryAuthorityGuard;
 
   constructor(private readonly config: MemoryKernelConfig) {
     this.store = new JsonlMemoryStore(config.runtimeHomePath);
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
+    this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath);
     this.source = this.config.source ?? `mneme/${this.config.runtimeHomePath}`;
+    this.embeddingProvider = config.embeddingProvider;
+    this.authority = new MemoryAuthorityGuard(config.runtimeHomePath, config.authority);
+  }
+
+  private async outcome(call: MemoryToolCall, tool: MemoryToolName, decision: MemoryToolResult["decision"], verified: boolean): Promise<void> {
+    const principal = verified ? call.envelope.principal.agentId : "mneme-system";
+    await appendToolOutcomeEvent(this.causalStore, {
+      runId: resolveCausalRunId(), agentId: principal, principalId: verified ? `agent:${principal}` : "system:mneme",
+      causeEventIds: verified ? [call.envelope.wake_id] : [], tool, decision,
+      argumentHash: hashArgumentsForEvidence(call.arguments),
+      requestHash: createHash("sha256").update(call.request_id).digest("hex"),
+      ...(verified && call.envelope.authority ? { authorityHash: createHash("sha256").update(call.envelope.authority).digest("hex") } : {})
+    });
+  }
+
+  private async untrustedOutcome(tool: MemoryToolName): Promise<void> {
+    await appendToolOutcomeEvent(this.causalStore, {
+      runId: resolveCausalRunId(), agentId: "mneme-system", principalId: "system:mneme",
+      causeEventIds: [], tool, decision: "malformed_request",
+      argumentHash: UNTRUSTED_ARGUMENT_SHA256, requestHash: UNTRUSTED_REQUEST_SHA256
+    });
+  }
+
+  /** MCP has no upstream wake event, so persist its Mneme-owned request fact
+   * before any lifecycle or outcome event is allowed to cite it. */
+  private async requestParent(call: MemoryToolCall, tool: MemoryToolName): Promise<void> {
+    if (call.envelope.transport !== "mcp") return;
+    const principal = call.envelope.principal.agentId;
+    await appendToolRequestEvent(this.causalStore, {
+      runId: resolveCausalRunId(),
+      agentId: principal,
+      principalId: `agent:${principal}`,
+      eventId: call.envelope.wake_id,
+      tool,
+      argumentHash: hashArgumentsForEvidence(call.arguments),
+      requestHash: createHash("sha256").update(call.request_id).digest("hex"),
+      authorityHash: createHash("sha256").update(call.envelope.authority ?? "").digest("hex")
+    });
+  }
+
+  private async execute(
+    call: MemoryToolCall,
+    tool: MemoryToolName,
+    work: (verifiedCall: MemoryToolCall) => Promise<MemoryToolResult>
+  ): Promise<MemoryToolResult> {
+    const startAt = Date.now();
+    let attemptedCall: MemoryToolCall;
+    try {
+      // Detach the complete call before the first await. The authority guard
+      // canonicalizes once more at its own public boundary and returns the
+      // verified frozen value used below.
+      attemptedCall = snapshotMemoryToolCall(call);
+    } catch {
+      const result = malformedUntrustedToolCall(tool, startAt);
+      try { await this.untrustedOutcome(tool); } catch { return unavailableUntrustedToolCall(tool, startAt); }
+      return result;
+    }
+
+    if (attemptedCall.tool !== tool) {
+      const result = malformed(attemptedCall, tool, "authority tool does not match invocation", startAt);
+      try { await this.outcome(attemptedCall, tool, "malformed_request", false); } catch { return unavailable(attemptedCall, tool, "memory evidence unavailable", startAt); }
+      return result;
+    }
+
+    let verifiedCall: MemoryToolCall;
+    try {
+      verifiedCall = await this.authority.consume(attemptedCall);
+    } catch (error) {
+      const result = malformed(attemptedCall, tool, error instanceof Error ? error.message : "invalid authority", startAt);
+      try { await this.outcome(attemptedCall, tool, "malformed_request", false); } catch { return unavailable(attemptedCall, tool, "memory evidence unavailable", startAt); }
+      return result;
+    }
+
+    try {
+      await this.requestParent(verifiedCall, tool);
+    } catch {
+      // An MCP request parent is required before any effect can cite it. If
+      // that evidence write fails, do not execute and do not fabricate an
+      // unauthenticated system outcome for an authenticated attempt.
+      return unavailable(verifiedCall, tool, "memory evidence unavailable", startAt);
+    }
+    let result: MemoryToolResult;
+    try { result = await work(verifiedCall); } catch { result = unavailable(verifiedCall, tool, "memory service unavailable", startAt); }
+    try { await this.outcome(verifiedCall, tool, result.decision, true); } catch { return unavailable(verifiedCall, tool, "memory evidence unavailable", startAt); }
+    return result;
   }
 
   async search(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return this.execute(call, "memory.search", (verifiedCall) => this.searchAuthorized(verifiedCall));
+  }
+
+  private async searchAuthorized(call: MemoryToolCall): Promise<MemoryToolResult> {
     const startAt = Date.now();
     if (hasInvalidV1Envelope(call.envelope.version)) {
       return malformed(call, "memory.search", "unsupported envelope", startAt);
@@ -62,45 +178,34 @@ export class JsonlMemoryKernel implements MemoryKernel {
 
     const requester = sanitizePrincipal(call.envelope.principal);
     const scope = resolveScope(args.scope, requester);
+    const allowedScopes = this.allowedScopes(call, requester);
+    if (scope !== "all" && !allowedScopes.includes(scope)) {
+      return malformed(call, "memory.search", "scope is not authorized", startAt);
+    }
     const limit = asNumber(args.limit) || 20;
+    const queryText = args.query;
 
     try {
       const allEvents = await this.store.read();
       await this.index.rebuildFromEvents(allEvents);
-      const indexed = await this.index.query({
-        allowedScopes: scope === "all" ? undefined : [scope],
-        query: args.query,
-        limit: Math.max(limit * 4, 40)
+      const { candidates: ranked } = await prepareSearchCandidates({
+        scope,
+        queryText,
+        limit,
+        allEvents,
+        requester,
+        allowedScopes,
+        embeddingProvider: this.embeddingProvider,
+        index: this.index
       });
-
-      const events = indexed.map((entry) => entry.event);
-      const tombstones = collectTombstones(allEvents);
-      const filteredEvents = events
-        .filter((event) => isRecallableMemoryEvent(event) && !tombstones.has(event.id))
-        .filter((event) => matchesQuery(event, args.query));
-
-      const selections = scope === "all"
-        ? filteredEvents.map((event) => ({
-          event,
-          decision: memoryPolicy({ request: requester, candidate: event, activeScope: requester }).decision
-        })).filter((entry) => entry.decision !== "deny")
-          .sort((left, right) => Date.parse(right.event.createdAt) - Date.parse(left.event.createdAt))
-        : runRecall({
-          actor: requester,
-          scopeIds: [scope],
-          events: filteredEvents,
-          query: args.query,
-          maxTokens: limit * 80
-        }).selected.map((entry) => ({ event: entry.event, decision: entry.decision }));
-
-      const selected = selections.slice(0, limit);
+      const selected = ranked.slice(0, limit);
       if (selected.length === 0) {
         return {
           request_id: call.request_id,
           tool: "memory.search",
           decision: "deny",
           content: [],
-          audit: makeAudit(call, events, startAt)
+          audit: makeAudit(call, [], startAt)
         };
       }
 
@@ -109,14 +214,24 @@ export class JsonlMemoryKernel implements MemoryKernel {
         tool: "memory.search",
         decision: decide(selected.map((entry) => entry.decision)),
         content: selected.map((entry) => makeSearchResult(entry.decision, entry.event)),
-        audit: makeAudit(call, selected.map((entry) => entry.event), startAt)
+        audit: makeAudit(call, selected.filter((entry) => canExposeEventId(entry.decision)).map((entry) => entry.event), startAt)
       };
-    } catch (error) {
-      return unavailable(call, "memory.search", String(error instanceof Error ? error.message : error), startAt);
+    } catch {
+      return unavailable(call, "memory.search", "memory service unavailable", startAt);
     }
   }
 
+  private allowedScopes(call: MemoryToolCall, requester: MemoryToolCall["envelope"]["principal"]): string[] {
+    const minted = call.envelope.allowed_scopes;
+    if (!minted || minted.length === 0) return [resolveScope("current", requester)];
+    return [...new Set(minted.map((scope) => resolveScope(scope, requester)))];
+  }
+
   async locate(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return this.execute(call, "memory.locate", (verifiedCall) => this.locateAuthorized(verifiedCall));
+  }
+
+  private async locateAuthorized(call: MemoryToolCall): Promise<MemoryToolResult> {
     const startAt = Date.now();
     if (hasInvalidV1Envelope(call.envelope.version)) {
       return malformed(call, "memory.locate", "unsupported envelope", startAt);
@@ -136,6 +251,7 @@ export class JsonlMemoryKernel implements MemoryKernel {
       const query = args.query;
       const candidateEvents = (await this.index.query({
         query,
+        allowedScopes: this.allowedScopes(call, requester),
         limit: Math.max(limit * 8, 40)
       })).map((entry) => entry.event)
         .filter((event) => isRecallableMemoryEvent(event) && !collectTombstones(allEvents).has(event.id));
@@ -204,179 +320,27 @@ export class JsonlMemoryKernel implements MemoryKernel {
         tool: "memory.locate",
         decision: "locate_only",
         content: selected.map((entry) => makeLocateResult(entry)),
-        audit: makeAudit(call, [locatedEvent, ...selected.map((entry) => entry.event)], startAt)
+        audit: makeAudit(call, [locatedEvent, ...selected.filter((entry) => canExposeEventId(entry.decision)).map((entry) => entry.event)], startAt)
       };
-    } catch (error) {
-      return unavailable(call, "memory.locate", String(error instanceof Error ? error.message : error), startAt);
+    } catch {
+      return unavailable(call, "memory.locate", "memory service unavailable", startAt);
     }
   }
 
   async register(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.register", "unsupported envelope", startAt);
-    }
-    const args = call.arguments;
-    if (!isRegisterArguments(args)) {
-      return malformed(call, "memory.register", "memory.register requires evidence and content fields", startAt);
-    }
-
-    const principal = args.principal
-      ? sanitizePrincipal(args.principal)
-      : sanitizePrincipal(call.envelope.principal);
-    try {
-      const event = await this.store.append({
-        type: "memory.registered",
-        principal,
-        scope: resolveScope(args.scope, principal),
-        visibility: args.visibility,
-        source: args.source_type,
-        content: args.content,
-        tags: ["registered", principal.scope, args.visibility],
-        entities: [principal.agentId, principal.scope],
-        sensitivity: args.sensitivity,
-        parentEventIds: args.evidence_event_ids,
-        confidence: args.confidence
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.register",
-        decision: "allow_raw",
-        content: [{
-          kind: "memory",
-          text: "Registered memory with explicit evidence.",
-          event_ids: [event.id],
-          scope: event.scope,
-          principal: event.principal,
-          redactions: [],
-          confidence: args.confidence
-        }],
-        audit: makeAudit(call, [event], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.register", String(error instanceof Error ? error.message : error), startAt);
-    }
+    return this.execute(call, "memory.register", (verifiedCall) => registerMemory(this.store, this.causalStore, verifiedCall));
   }
 
   async summarize(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.summarize", "unsupported envelope", startAt);
-    }
-
-    const args = call.arguments;
-    if (!isSummarizeArguments(args)) {
-      return malformed(call, "memory.summarize", "memory.summarize requires { scope }", startAt);
-    }
-
-    const requester = sanitizePrincipal(call.envelope.principal);
-    const scope = resolveScope(args.scope, requester);
-    const horizon = Math.min(asNumber(args.horizon) || 12, 40);
-
-    try {
-      const events = await this.store.read({ scope });
-      const tombstones = collectTombstones(events);
-      const sourceIds: string[] = [];
-
-      const lines = events
-        .filter((event) => isRecallableMemoryEvent(event) && !tombstones.has(event.id))
-        .map((event) => ({
-          event,
-          decision: memoryPolicy({ request: requester, candidate: event, activeScope: requester }).decision
-        }))
-        .filter((entry) => entry.decision !== "deny")
-        .slice(0, horizon)
-        .map((entry) => {
-          sourceIds.push(entry.event.id);
-          return `${entry.event.createdAt}: ${policyText(entry.decision, eventText(entry.event))}`;
-        });
-
-      if (sourceIds.length === 0) {
-        return { request_id: call.request_id, tool: "memory.summarize", decision: "deny", content: [], audit: makeAudit(call, [], startAt) };
-      }
-
-      const summary = await this.store.append({
-        type: "memory.summarized",
-        principal: requester,
-        scope,
-        visibility: "private",
-        source: this.source,
-        content: { kind: "text", text: lines.join("\n") },
-        tags: ["summary", ...sourceIds],
-        entities: [requester.agentId, requester.scope],
-        sensitivity: "normal",
-        confidence: 1,
-        parentEventIds: sourceIds
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.summarize",
-        decision: "allow_summary",
-        content: [{
-          kind: "narrative",
-          text: lines.join("\n"),
-          event_ids: sourceIds,
-          scope,
-          principal: requester,
-          redactions: [],
-          confidence: 1
-        }],
-        audit: makeAudit(call, [summary], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.summarize", String(error instanceof Error ? error.message : error), startAt);
-    }
+    return this.execute(call, "memory.summarize", (verifiedCall) => summarizeMemory(this.store, this.causalStore, this.source, verifiedCall));
   }
 
   async forget(call: MemoryToolCall): Promise<MemoryToolResult> {
-    const startAt = Date.now();
-    if (hasInvalidV1Envelope(call.envelope.version)) {
-      return malformed(call, "memory.forget", "unsupported envelope", startAt);
-    }
-    const args = call.arguments;
-    if (!isForgetArguments(args)) {
-      return malformed(call, "memory.forget", "memory.forget requires { scope, event_ids }", startAt);
-    }
+    return this.execute(call, "memory.forget", (verifiedCall) => forgetMemory(this.store, this.causalStore, this.source, verifiedCall));
+  }
 
-    const requester = sanitizePrincipal(call.envelope.principal);
-    try {
-      const event = await this.store.append({
-        type: "memory.forgotten",
-        principal: requester,
-        scope: resolveScope(args.scope, requester),
-        visibility: "private",
-        source: this.source,
-        content: {
-          kind: "text",
-          text: `Tombstone for ${args.event_ids.length} event(s).`
-        },
-        tags: ["forget", "tombstone"],
-        entities: [requester.agentId, requester.scope],
-        sensitivity: "secret",
-        confidence: 1,
-        parentEventIds: args.event_ids
-      } satisfies MemoryEventInput);
-
-      return {
-        request_id: call.request_id,
-        tool: "memory.forget",
-        decision: "allow_raw",
-        content: [{
-          kind: "memory",
-          text: `Tombstone written for ${args.event_ids.length} event(s).`,
-          event_ids: [event.id],
-          scope: event.scope,
-          principal: event.principal,
-          redactions: ["content-redacted"],
-          confidence: 1
-        }],
-        audit: makeAudit(call, [event], startAt)
-      };
-    } catch (error) {
-      return unavailable(call, "memory.forget", String(error instanceof Error ? error.message : error), startAt);
-    }
+  async promote(call: MemoryToolCall): Promise<MemoryToolResult> {
+    return this.execute(call, "memory.promote", (verifiedCall) => promoteMemory(this.store, this.causalStore, this.source, verifiedCall));
   }
 }
 

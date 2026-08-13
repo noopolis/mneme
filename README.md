@@ -39,6 +39,7 @@ Start a local stdio MCP server for one agent:
 mneme mcp \
   --runtime-home ./.runtime/agent-a \
   --agent-id agent-a \
+  --mode awake \
   --conversation-scope global
 ```
 
@@ -49,6 +50,13 @@ The server exposes:
 - `memory_register`
 - `memory_summarize`
 - `memory_forget`
+
+`--mode` controls the tool surface and is accepted as either `awake` (default) or
+`dream` (maintenance / consolidation-audit surface). Both modes share the same MCP
+server binary and transport; only tool descriptions and guidance differ.
+Callers should install or inject the awake Mneme skill for normal work and the
+dream Mneme skill for one-off consolidation sessions. Dream mode is a session
+contract, not a second memory store.
 
 The MCP adapter uses the same kernel as direct in-process integrations. The
 transport only changes the envelope metadata.
@@ -72,6 +80,8 @@ Useful variables:
 - `MNEME_CONVERSATION_SCOPE`
 - `MNEME_AUDIENCE_KEY`
 - `MNEME_POLICY_VERSION`
+- `MNEME_MODE`
+- `MNEME_MODE=awake|dream`
 
 ## Development
 
