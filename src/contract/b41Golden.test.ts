@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   canonicalJsonStringify,
@@ -43,20 +42,10 @@ const rejectedNames = [
   "reject-unsafe-integer", "reject-invalid-unicode", "reject-invalid-json-spelling", "reject-non-finite-json-spelling"
 ] as const;
 
-const findCorpusPath = async (): Promise<string> => {
-  let directory = path.dirname(fileURLToPath(import.meta.url));
-  while (true) {
-    for (const candidate of [
-      path.join(directory, "ecosystem/stele/src/contracts/goldens/causal-contract.v1.json"),
-      path.join(directory, "stele/src/contracts/goldens/causal-contract.v1.json")
-    ]) {
-      try { await access(candidate); return candidate; } catch { /* keep ascending */ }
-    }
-    const parent = path.dirname(directory);
-    if (parent === directory) throw new Error("B41 Stele golden corpus not found");
-    directory = parent;
-  }
-};
+const require = createRequire(import.meta.url);
+const corpusPath = require.resolve(
+  "@noopolis/stele/contracts/goldens/causal-contract.v1.json"
+);
 
 const digestTuples = new Set([
   JSON.stringify(["causal-event/canonical-json", "sha-256", "noopolis.canonical-json.v1:utf-8", "lowercase-hex"]),
@@ -129,7 +118,7 @@ const validateGoldenBundle = (raw: string): string => {
 };
 
 const loadCorpus = async (): Promise<GoldenCase[]> => {
-  const parsed = JSON.parse(await readFile(await findCorpusPath(), "utf8")) as unknown;
+  const parsed = JSON.parse(await readFile(corpusPath, "utf8")) as unknown;
   assert.ok(Array.isArray(parsed));
   return parsed.map((value) => {
     assert.ok(value && typeof value === "object" && !Array.isArray(value));

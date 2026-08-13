@@ -47,6 +47,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@noopolis/stele": "^0.0.2",
     "@types/node": "^24.12.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
