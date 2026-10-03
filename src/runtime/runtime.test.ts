@@ -218,57 +218,23 @@ test("prepareTurn uses semantic retrieval when lexical overlap is absent", async
     embeddingProvider: createFakeEmbeddingProvider()
   });
 
-  await runtime.recordTurn({
-    principal: {
-      agentId: "agent-a",
-      scope: "room",
-      qualifier: "noopolis:agora"
-    },
-    prompt: {
-      principal: {
-        agentId: "agent-a",
-        scope: "room",
-        qualifier: "noopolis:agora"
-      },
-      sections: [],
-      rawHint: "seed"
-    },
-    request: {
-      eventId: "daimon:evt-semantics",
-      kind: "manual",
-      text: "alpha-drive-marker",
-      context: { networkId: "noopolis", roomId: "agora" }
-    },
-    result: "completed",
-    outputText: "alpha-drive-marker output",
-    toolEvents: []
-  });
-
-  await runtime.recordTurn({
-    principal: {
-      agentId: "agent-a",
-      scope: "room",
-      qualifier: "noopolis:ops"
-    },
-    prompt: {
-      principal: {
-        agentId: "agent-a",
-        scope: "room",
-        qualifier: "noopolis:ops"
-      },
-      sections: [],
-      rawHint: "seed"
-    },
-    request: {
-      eventId: "daimon:evt-noise",
-      kind: "manual",
-      text: "ops-marker",
-      context: { networkId: "noopolis", roomId: "ops" }
-    },
-    result: "completed",
-    outputText: "ops-marker output",
-    toolEvents: []
-  });
+  // Seed real memories through the kernel (the path an agent's own notes
+  // take); recordTurn audit records are never recall candidates.
+  const agora: MemoryPrincipalRef = { agentId: "agent-a", scope: "room", qualifier: "noopolis:agora" };
+  const ops: MemoryPrincipalRef = { agentId: "agent-a", scope: "room", qualifier: "noopolis:ops" };
+  for (const [principal, text, requestId] of [
+    [agora, "alpha-drive-marker note", "reg-semantic-agora"],
+    [ops, "ops-marker note", "reg-semantic-ops"]
+  ] as const) {
+    await runtime.kernel.register(registerToolCall(runtime, principal, {
+      scope: "current",
+      kind: "text",
+      content: { kind: "text", text },
+      visibility: "room",
+      sensitivity: "normal",
+      source_type: "test"
+    }, requestId));
+  }
 
   const turn = await runtime.prepareTurn({
     eventId: "daimon:evt-search",
@@ -431,23 +397,14 @@ test("prepareTurn emits a schema-valid memory.recalled causal event per selected
       qualifier: "noopolis:agora"
     };
 
-    await runtime.recordTurn({
-      principal,
-      prompt: {
-        principal,
-        sections: [{ heading: "Note", text: "Task: map roadmap updates." }],
-        rawHint: "seed"
-      },
-      request: {
-        eventId: "daimon:evt-causal-source",
-        kind: "manual",
-        text: "I updated the roadmap.",
-        context: { networkId: "noopolis", roomId: "agora" }
-      },
-      result: "completed",
-      outputText: "Done.",
-      toolEvents: []
-    });
+    await runtime.kernel.register(registerToolCall(runtime, principal, {
+      scope: "current",
+      kind: "text",
+      content: { kind: "text", text: "Task: map roadmap updates." },
+      visibility: "room",
+      sensitivity: "normal",
+      source_type: "test"
+    }, "reg-causal-source"));
 
     const sourceStore = new JsonlMemoryStore(root);
     const sourceEvents = await sourceStore.read({ principalAgentId: "agent-a" });

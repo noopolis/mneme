@@ -35,15 +35,34 @@ const context = readMemoryContext({
   context: { networkId: "noopolis", roomId: "agora" }
 });
 
+// Seeds a real memory through the kernel (the path an agent's own notes take);
+// recordTurn writes turn-audit records, which are never recall candidates.
 const seed = async (runtime: MemoryRuntime, principal: MemoryPrincipalRef, eventId: string, text: string) => {
-  await runtime.recordTurn({
-    outputText: text,
+  const args = { scope: "current", kind: "text", content: { kind: "text", text }, visibility: principal.scope, sensitivity: "normal", source_type: "test" };
+  const envelope = {
+    version: "mneme.memory.tool.v1",
+    mode: "awake",
+    wake_id: eventId,
+    thread_id: "public-surface-thread",
     principal,
-    prompt: { principal, rawHint: "seed", sections: [] },
-    request: { context, eventId, kind: "manual", text },
-    result: "completed",
-    toolEvents: []
+    conversation_scope: principal.qualifier ?? principal.scope,
+    audience_key: "public-surface",
+    policy_version: "test",
+    allowed_scope_aliases: ["all", "current", "global"],
+    transport: "in_process",
+    nonce: `${eventId}:register`,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    capability: "memory"
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  const request_id = `${eventId}:register`;
+  const result = await runtime.kernel.register({
+    request_id,
+    tool: "memory.register",
+    arguments: args,
+    envelope: { ...envelope, authority: runtime.authority.issue({ request_id, tool: "memory.register", arguments: args, envelope }) }
   });
+  assert.equal(result.content[0].event_ids.length, 1);
 };
 
 const recallForMode = async (mode: "on" | "off" | "shuffled") => {
