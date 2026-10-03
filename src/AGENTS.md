@@ -86,6 +86,9 @@ This folder is the standalone Noopolis memory package implementation.
   frozen copy of the exact finite `allowedScopes` used for recall. Its
   `recordTurn` accepts only the configured bank's agent and stamps one exact
   `memory.written` causal fact for every persisted domain fact.
+  Every event `recordTurn` writes is tagged `turn-audit` (`turnAudit.ts`):
+  it stays in the ledger for audit but `recallableEvents` never returns it,
+  and untagged legacy turn records are recognised by their exact shape.
 - `mcp/` exposes the same tool contract through Model Context Protocol and
   lowers only finite trusted `allowedScopes`; it never grants unrestricted
   `all` through the descriptor/MCP path.
