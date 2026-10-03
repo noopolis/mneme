@@ -3,6 +3,7 @@ import { memoryPolicy } from "../policy/policy.js";
 import { runRecall } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { projectLifecycle } from "../store/lifecycle.js";
+import { isTurnAuditEvent, TURN_AUDIT_TAG } from "./turnAudit.js";
 import type {
   MemoryDecision,
   MemoryEvent,
@@ -89,7 +90,8 @@ const isHeadTtlExpired = (createdAt: string, ttl: string | undefined, now: numbe
  * Returns only each memory chain's current head event when that head is
  * active or promoted and not TTL-expired — superseded revisions, forgotten
  * chains, and audit-only events (recalled/located/denied) never come back
- * out. Name kept stable for existing callers (prepareTurn, kernel search
+ * out, and neither do turn-audit records written by `recordTurn` (see
+ * turnAudit.ts). Name kept stable for existing callers (prepareTurn, kernel search
  * helpers via toolContract tests).
  */
 export const recallableEvents = (events: MemoryEvent[]): MemoryEvent[] => {
@@ -106,7 +108,7 @@ export const recallableEvents = (events: MemoryEvent[]): MemoryEvent[] => {
       continue;
     }
     const event = eventsById.get(head.revisionId);
-    if (event) {
+    if (event && !isTurnAuditEvent(event)) {
       result.push(event);
     }
   }
@@ -233,7 +235,7 @@ export const buildDecisionEvents = (input: {
     ...extractTokens(input.packet.principal.scope)
   ];
 
-  const tags = memoryTagsFromRequest(input.request, input.packet, { principal: input.principal });
+  const tags = [...memoryTagsFromRequest(input.request, input.packet, { principal: input.principal }), TURN_AUDIT_TAG];
 
   const base = baseEventInput({
     principal: input.principal,
@@ -326,7 +328,7 @@ export const selectToolSummary = (toolEvents: unknown[]): MemoryEventInput | und
       kind: "text",
       text: `Observed ${toolEvents.length} tool event(s) during turn.`
     },
-    tags: ["tool", "summary"],
+    tags: ["tool", "summary", TURN_AUDIT_TAG],
     entities: ["tool"],
     parentEventIds: []
   };
