@@ -9,7 +9,7 @@ process.env.NOOPOLIS_RUN_ID = "test-runtime-recall-mode";
 import { hashCanonicalJson } from "../contract/causal.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import { CausalEventStore } from "../store/causalStore.js";
-import { wallClock, type MemoryClock } from "../contract/clock.js";
+import { resolveClock, wallClock, type MemoryClock } from "../contract/clock.js";
 import { UNTRUSTED_ARGUMENT_SHA256, UNTRUSTED_REQUEST_SHA256 } from "../kernel/untrusted.js";
 import {
   guardKernelForRecallMode,
@@ -171,7 +171,7 @@ const countingResult = (tool: MemoryToolCall["tool"]): MemoryToolResult => ({
 const makeCountingKernel = (clock?: MemoryClock): { kernel: MemoryKernel; calls: string[] } => {
   const calls: string[] = [];
   const kernel: MemoryKernel = {
-    clock,
+    ...(clock === undefined ? {} : { clock }),
     search: async (call) => { calls.push("search"); return countingResult(call.tool); },
     locate: async (call) => { calls.push("locate"); return countingResult(call.tool); },
     register: async (call) => { calls.push("register"); return countingResult(call.tool); },
@@ -192,8 +192,8 @@ test("direct recall-mode wrappers resolve all supplied clocks before every mode"
   const authority = { secret: "clock-test", bankId: "agent-a", runtimeId: "clock-test" };
   const evidence = { runtimeHomePath: root, causalStore, authority };
   for (const mode of ["on", "off", "shuffled"] as const) {
-    assert.equal(guardKernelForRecallMode(kernel, mode, evidence).clock, clock);
-    assert.equal(guardKernelForRecallMode(kernel, mode, { ...evidence, clock }).clock, clock);
+    assert.equal(resolveClock(guardKernelForRecallMode(kernel, mode, evidence).clock), causalStore.clock);
+    assert.equal(resolveClock(guardKernelForRecallMode(kernel, mode, { ...evidence, clock }).clock), causalStore.clock);
     assert.doesNotThrow(() => guardKernelForRecallMode(legacy, mode));
     for (const [dependency, options] of [
       [wallKernel, { ...evidence, clock }],
@@ -214,6 +214,22 @@ test("direct recall-mode wrappers resolve all supplied clocks before every mode"
     }), /dependency clock.*match/, mode);
   }
 });
+
+for (const mode of ["off", "on", "shuffled"] as const) {
+  test(`legacy clockless kernels compose with default causal stores in ${mode} mode`, () => {
+    const root = "/unused-clock-validation";
+    const kernel = makeCountingKernel().kernel;
+    const causalStore = new CausalEventStore(root);
+    assert.equal(kernel.clock, undefined);
+    assert.equal(causalStore.clock, wallClock);
+    const guarded = guardKernelForRecallMode(kernel, mode, {
+      runtimeHomePath: root, causalStore,
+      authority: { secret: "clock-test", bankId: "agent-a", runtimeId: "clock-test" }
+    });
+    if (mode === "on") assert.equal(guarded, kernel);
+    else assert.equal(guarded.clock, wallClock);
+  });
+}
 
 test("guardKernelForRecallMode passes the kernel through unchanged in on mode", () => {
   const { kernel } = makeCountingKernel();
@@ -277,7 +293,7 @@ test("B45 recall-mode guard executes and records only its immutable signed call 
       envelope: { ...unsigned, authority: handoff.issue(base) }
     };
     const causalStore = new CausalEventStore(root);
-    const guarded = guardKernelForRecallMode(makeCountingKernel(wallClock).kernel, "off", {
+    const guarded = guardKernelForRecallMode(makeCountingKernel().kernel, "off", {
       runtimeHomePath: root,
       authority,
       causalStore
@@ -307,7 +323,7 @@ test("B45 recall-mode snapshot failure never inspects the rejected call", async 
   try {
     const authority = { secret: "recall hostile authority", bankId: "agent-a", runtimeId: "recall-hostile-runtime" };
     const causalStore = new CausalEventStore(root);
-    const guarded = guardKernelForRecallMode(makeCountingKernel(wallClock).kernel, "off", { runtimeHomePath: root, authority, causalStore });
+    const guarded = guardKernelForRecallMode(makeCountingKernel().kernel, "off", { runtimeHomePath: root, authority, causalStore });
     let trapHits = 0;
     const hostile = new Proxy(toolCall("memory.search"), {
       get: (target, key, receiver) => { trapHits += 1; return Reflect.get(target, key, receiver); },

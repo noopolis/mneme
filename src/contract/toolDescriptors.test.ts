@@ -85,6 +85,31 @@ test("tool envelope nonces stay unique with frozen injected or default clocks an
   assert.deepEqual({ ...first, nonce: envelope.nonce }, envelope);
 });
 
+test("direct envelope builders reject unsupported clock timestamps and default expiries", () => {
+  const context: MemoryToolExecutionContext = {
+    wakeId: "clock-boundary", threadId: "clock-boundary",
+    principal: { agentId: "agent-a", scope: "global" }, conversationScope: "global"
+  };
+  for (const now of [NaN, Infinity, -Infinity, Date.parse("0000-01-01T00:00:00Z") - 1,
+    Date.parse("9999-12-31T23:54:59.999Z") + 1, Date.parse("+010000-01-01T00:00:00Z")]) {
+    for (const explicit of [{}, { nonce: "supplied" }, { expiresAt: "2000-01-01T00:05:00Z" }]) {
+      assert.throws(() => createMemoryToolEnvelope({ ...context, ...explicit, clock: () => now }), {
+        name: "RangeError", message: /clock.*date range.*0000–9999/
+      });
+    }
+  }
+});
+
+test("direct envelope builders validate the later clock sample used for expiry", () => {
+  let reads = 0;
+  const boundary = Date.parse("9999-12-31T23:54:59.999Z");
+  assert.throws(() => createMemoryToolEnvelope({
+    wakeId: "clock-boundary", threadId: "clock-boundary",
+    principal: { agentId: "agent-a", scope: "global" }, conversationScope: "global",
+    clock: () => boundary + reads++
+  }), { name: "RangeError", message: /clock.*date range.*0000–9999/ });
+});
+
 test("frozen clock permits two calls in the same wake and thread but rejects an actual replay", async (t) => {
   const root = await tempDir();
   const clock = () => Date.parse("2000-01-01T00:00:00Z");

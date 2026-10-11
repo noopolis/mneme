@@ -143,10 +143,10 @@ test("clock configuration rejects unrepresentable timestamps and expiry overflow
 test("MCP context and constructed runtime share the configured clock", async () => {
   const clock = () => Date.parse("2000-01-01T00:00:00Z");
   const resolved = resolveMnemeMcpConfig({ runtimeHomePath: await temp(), agentId: "luna", clock });
-  assert.equal(resolved.runtime.clock, clock);
+  assert.equal(resolved.runtime.clock, resolved.clock);
   assert.equal(createMcpToolContext(resolved, "memory_search").expiresAt, "2000-01-01T00:05:00.000Z");
   const inherited = resolveMnemeMcpConfig({ runtimeHomePath: resolved.runtimeHomePath, agentId: "luna", runtime: resolved.runtime });
-  assert.equal(inherited.clock, clock);
+  assert.equal(inherited.clock, resolved.clock);
   const matched = resolveMnemeMcpConfig({ runtimeHomePath: resolved.runtimeHomePath, agentId: "luna", runtime: resolved.runtime, clock });
   assert.equal(matched.runtime, resolved.runtime);
 });

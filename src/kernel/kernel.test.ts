@@ -14,7 +14,7 @@ import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import type { MemoryToolCall } from "../contract/types.js";
 import { createMemoryToolDescriptors } from "../contract/toolDescriptors.js";
-import { wallClock } from "../contract/clock.js";
+import { resolveClock, wallClock } from "../contract/clock.js";
 
 type Principal = { agentId: string; scope: "global" | "room" | "pair" | "team" | "role" | "task" | "artifact"; qualifier?: string };
 
@@ -114,8 +114,8 @@ test("kernel inherits the supplied causal store clock for memory and authority w
     const evidence = await causalStore.read();
     assert.ok(evidence.some((event) => event.type === "memory.written"));
     assert.ok(evidence.every((event) => event.recorded_at === events[0].createdAt));
-    assert.equal(kernel.clock, clock);
-    assert.equal(causalStore.clock, clock);
+    assert.equal(kernel.clock, causalStore.clock);
+    assert.equal(causalStore.clock, resolveClock(clock));
   }
 });
 

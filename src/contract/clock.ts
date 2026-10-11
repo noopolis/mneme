@@ -7,7 +7,7 @@ export interface MemoryClockOptions {
 
 export const wallClock: MemoryClock = () => Date.now();
 
-/** Default envelope lifetime, also reserved by offset-clock startup validation. */
+/** Default envelope lifetime, reserved by validation on every custom clock read. */
 export const MEMORY_TOOL_ENVELOPE_TTL_MS = 5 * 60_000;
 
 const MIN_TIMESTAMP_MS = Date.parse("0000-01-01T00:00:00.000Z");
@@ -16,26 +16,48 @@ const MAX_TIMESTAMP_MS = Date.parse("9999-12-31T23:59:59.999Z");
 const validateClockTimestamp = (timestamp: number): void => {
   if (!Number.isFinite(timestamp) || timestamp < MIN_TIMESTAMP_MS
     || timestamp + MEMORY_TOOL_ENVELOPE_TTL_MS > MAX_TIMESTAMP_MS) {
-    throw new Error("clock configuration produces a timestamp or envelope expiry outside the storage date range (years 0000–9999)");
+    throw new RangeError("clock configuration or sample produces a timestamp or envelope expiry outside the storage date range (years 0000–9999)");
   }
 };
 
+// Both a source and its wrapper map to the same wrapper, preserving composition identity.
+const validatedClocks = new WeakMap<MemoryClock, MemoryClock>();
+const validatedClock = (clock: MemoryClock): MemoryClock => {
+  if (clock === wallClock) return clock;
+  const existing = validatedClocks.get(clock);
+  if (existing) return existing;
+  const validated = () => {
+    const timestamp = clock();
+    validateClockTimestamp(timestamp);
+    return timestamp;
+  };
+  validatedClocks.set(clock, validated);
+  validatedClocks.set(validated, validated);
+  return validated;
+};
+
+/** Sample directly without a configuration-time read; explicit envelope fields need no sample. */
+export const sampleClock = (clock: MemoryClock = wallClock): number => validatedClock(clock)();
+
 /** Resolve one clock for a composition; absent dependencies are not supplied dependencies.
- * Legacy dependencies without clocks remain valid when no clock is configured or exposed.
- * Otherwise every supplied dependency must expose the same function, including inherited clocks.
+ * Without configuration, legacy dependencies may omit clocks or expose the default wall clock.
+ * Otherwise every supplied dependency must expose the same source, raw or already validated.
  */
 export const resolveClock = (
   configured?: MemoryClock,
   dependencies: readonly (MemoryClockOptions | undefined)[] = []
 ): MemoryClock => {
   const supplied = dependencies.filter((dependency): dependency is MemoryClockOptions => dependency !== undefined);
+  if (configured === undefined && supplied.every((dependency) => dependency.clock === undefined || dependency.clock === wallClock)) {
+    return wallClock;
+  }
   const clock = configured ?? supplied.find((dependency) => dependency.clock !== undefined)?.clock;
-  if (clock === undefined) return wallClock;
-  if (supplied.some((dependency) => dependency.clock !== clock)) {
+  const validated = validatedClock(clock ?? wallClock);
+  if (supplied.some((dependency) => dependency.clock === undefined || validatedClock(dependency.clock) !== validated)) {
     throw new Error("Mneme dependency clock must match the configured clock or inherited clock; every supplied dependency must expose it");
   }
-  validateClockTimestamp(clock());
-  return clock;
+  validated();
+  return validated;
 };
 
 export interface OffsetClockOptions {
@@ -66,5 +88,5 @@ export const createOffsetClock = ({ origin, anchorMs, realNow = wallClock }: Off
   }
   const initialMs = originMs + (initialRealMs - anchor);
   validateClockTimestamp(initialMs);
-  return () => originMs + (realNow() - anchor);
+  return validatedClock(() => originMs + (realNow() - anchor));
 };

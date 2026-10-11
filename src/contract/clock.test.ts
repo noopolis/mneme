@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -7,20 +10,47 @@ import {
   resolveClock, validateCausalEvent, wallClock, type MemoryClock, type MemoryStore
 } from "../index.js";
 
-test("resolveClock preserves no-clock legacy dependencies and requires function identity for injection", () => {
+test("resolveClock preserves legacy wall clocks and compares custom sources through stable wrappers", () => {
   const clock = () => 0;
+  const validated = resolveClock(clock);
   assert.equal(resolveClock(), wallClock);
   assert.equal(resolveClock(undefined, [undefined, {}, { clock: undefined }]), wallClock);
-  assert.equal(resolveClock(clock), clock);
-  assert.equal(resolveClock(clock, [undefined, { clock }]), clock);
-  assert.equal(resolveClock(undefined, [{ clock }, { clock }]), clock);
+  for (const dependencies of [[{}, { clock: wallClock }], [{ clock: wallClock }, {}], [{ clock: wallClock }]]) {
+    assert.equal(resolveClock(undefined, dependencies), wallClock);
+  }
+  assert.notEqual(validated, clock);
+  assert.equal(resolveClock(clock), validated);
+  assert.equal(resolveClock(validated), validated);
+  assert.equal(resolveClock(clock, [undefined, { clock }]), validated);
+  assert.equal(resolveClock(undefined, [{ clock }, { clock: validated }]), validated);
+  assert.equal(resolveClock(clock, [{ clock: validated }]), validated);
+  assert.equal(resolveClock(validated, [{ clock }]), validated);
   for (const configured of [undefined, clock]) {
-    for (const dependencies of [[{ clock }, {}], [{}, { clock }], [{ clock }, { clock: () => 0 }]]) {
+    for (const dependencies of [[{ clock }, {}], [{}, { clock }], [{ clock }, { clock: () => 0 }],
+      [{ clock: validated }, {}], [{ clock: validated }, { clock: wallClock }]]) {
       assert.throws(() => resolveClock(configured, dependencies), /dependency clock.*match/);
     }
   }
   assert.throws(() => resolveClock(clock, [{}]), /dependency clock.*match/);
   assert.throws(() => resolveClock(wallClock, [{}]), /dependency clock.*match/);
+});
+
+test("resolved custom clocks validate every read after a valid construction sample", () => {
+  let now = 0;
+  let reads = 0;
+  const source = () => { reads += 1; return now; };
+  const clock = resolveClock(source);
+  assert.equal(clock(), 0);
+  const beforeRead = reads;
+  assert.equal(clock(), 0);
+  assert.equal(reads, beforeRead + 1);
+  for (now of [NaN, Infinity, -Infinity, Date.parse("0000-01-01T00:00:00Z") - 1,
+    Date.parse("9999-12-31T23:54:59.999Z") + 1, Date.parse("+010000-01-01T00:00:00Z")]) {
+    assert.throws(() => clock(), { name: "RangeError", message: /clock.*date range.*0000–9999/ });
+  }
+  now = 1;
+  assert.equal(clock(), 1);
+  assert.equal(resolveClock(source), clock);
 });
 
 test("the public offset clock advances from an explicit anchor and normalizes offsets", () => {
@@ -99,6 +129,48 @@ test("offset clocks reject timestamps and expiries beyond the storage range, inc
   }
 });
 
+test("advancing offset clocks reject the first read beyond either supported boundary", () => {
+  for (const [origin, step] of [["0000-01-01T00:00:00Z", -1], ["9999-12-31T23:54:59.999Z", 1]] as const) {
+    let realMs = 0;
+    const clock = createOffsetClock({ origin, realNow: () => realMs });
+    assert.equal(clock(), Date.parse(origin));
+    realMs += step;
+    assert.throws(() => clock(), { name: "RangeError", message: /clock.*date range.*0000–9999/ });
+  }
+});
+
+test("stores reject advancing clock range errors before appending unsupported timestamps", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "mneme-clock-range-"));
+  try {
+    let realMs = 0;
+    const clock = createOffsetClock({ origin: "9999-12-31T23:54:59.999Z", realNow: () => realMs });
+    const store = new JsonlMemoryStore(root, { clock });
+    const causalStore = new CausalEventStore(root, { clock });
+    const appendMemory = () => store.append({
+      type: "memory.observed", principal: { agentId: "agent-a", scope: "global" },
+      scope: "agent:agent-a/scope:global", visibility: "global", source: "clock-test",
+      content: { kind: "text", text: "clock boundary" }
+    });
+    const appendCausal = () => causalStore.append({
+      runId: "clock-boundary", streamId: "memory:agent-a", type: "memory.tool.request",
+      principalId: "agent:agent-a", causeEventIds: [],
+      payload: { tool: "memory.search", argument_sha256: "a".repeat(64), authority_sha256: "b".repeat(64), request_sha256: "c".repeat(64) }
+    });
+    await appendMemory();
+    await appendCausal();
+    const memoryBefore = await store.read();
+    const causalBefore = await causalStore.read();
+    realMs += 1;
+    for (const append of [appendMemory, appendCausal]) {
+      await assert.rejects(append, { name: "RangeError", message: /clock.*date range.*0000–9999/ });
+    }
+    assert.deepEqual(await store.read(), memoryBefore);
+    assert.deepEqual(await causalStore.read(), causalBefore);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("injected clocks fail configuration before constructors can write unsupported timestamps", () => {
   for (const now of [NaN, Infinity, Date.parse("-000001-01-01T00:00:00Z"), Date.parse("+010000-01-01T00:00:00Z"), Date.parse("9999-12-31T23:55:00Z")]) {
     const clock = () => now;
@@ -117,8 +189,8 @@ test("injected clocks fail configuration before constructors can write unsupport
 test("deep-time shares its store clock and rejects mismatched or unexposed injection", () => {
   const clock = () => 0;
   const store = new JsonlMemoryStore("/unused-clock-validation", { clock });
-  assert.equal(createDeepTimeSession(store).clock, clock);
-  assert.equal(createDeepTimeSession(store, { clock }).clock, clock);
+  assert.equal(createDeepTimeSession(store).clock, store.clock);
+  assert.equal(createDeepTimeSession(store, { clock }).clock, store.clock);
   assert.throws(() => createDeepTimeSession(store, { clock: () => 0 }), /dependency clock.*match/);
   const legacy: MemoryStore = {
     append: store.append.bind(store), appendBatch: store.appendBatch.bind(store),

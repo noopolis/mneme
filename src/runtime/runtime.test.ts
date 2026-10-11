@@ -109,7 +109,7 @@ test("runtime clock reaches descriptors, mutation writes and recall-mode authori
       scope: "current", query: "CLOCK_WRITE_MARKER"
     }, { ...context, wakeId: "daimon:clock-tools" });
     assert.equal(searched.decision, recallMode === "on" ? "allow_raw" : "deny");
-    assert.equal(runtime.kernel.clock, clock);
+    assert.equal(runtime.kernel.clock, runtime.clock);
     const written = await new JsonlMemoryStore(root).read();
     assert.ok(written.length > 0);
     assert.ok(written.every((event) => event.createdAt === "2000-01-01T00:00:00.000Z"));
