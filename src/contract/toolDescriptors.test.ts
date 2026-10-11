@@ -32,14 +32,15 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-test("tool envelope nonce and expiry use the supplied clock and preserve explicit values", (t) => {
+test("tool envelope nonces stay unique with frozen injected or default clocks and preserve explicit values", (t) => {
   const now = Date.parse("2000-01-01T00:00:00Z");
   const context: MemoryToolExecutionContext = {
     wakeId: "clock-wake", threadId: "clock-thread",
     principal: { agentId: "agent-a", scope: "global" }, conversationScope: "global"
   };
   const envelope = createMemoryToolEnvelope({ ...context, clock: () => now });
-  assert.equal(envelope.nonce, `clock-wake:${now}`);
+  assert.notEqual(createMemoryToolEnvelope({ ...context, clock: () => now }).nonce, envelope.nonce);
+  assert.ok(envelope.nonce.startsWith(`clock-wake:${now}:`));
   assert.equal(envelope.expires_at, "2000-01-01T00:05:00.000Z");
   const explicit = createMemoryToolEnvelope({
     ...context, clock: () => { throw new Error("explicit fields need no time read"); },
@@ -48,7 +49,44 @@ test("tool envelope nonce and expiry use the supplied clock and preserve explici
   assert.equal(explicit.nonce, "supplied-nonce");
   assert.equal(explicit.expires_at, "2000-01-01T00:01:00.000Z");
   t.mock.method(Date, "now", () => now);
-  assert.deepEqual(createMemoryToolEnvelope(context), envelope);
+  const first = createMemoryToolEnvelope(context);
+  const second = createMemoryToolEnvelope(context);
+  assert.notEqual(first.nonce, second.nonce);
+  assert.ok(first.nonce.startsWith(`clock-wake:${now}:`));
+  assert.deepEqual({ ...first, nonce: envelope.nonce }, envelope);
+});
+
+test("frozen clock permits two calls in the same wake and thread but rejects an actual replay", async (t) => {
+  const root = await tempDir();
+  const clock = () => Date.parse("2000-01-01T00:00:00Z");
+  const runtime = createMemoryRuntime({ agentId: "luna", runtimeHomePath: root, clock, recallMode: "on" });
+  const principal = { agentId: "luna", scope: "global" as const };
+  const context: MemoryToolExecutionContext = {
+    wakeId: "daimon:frozen-wake", threadId: "frozen-thread", principal,
+    conversationScope: memoryScopeId(principal), authority: runtime.authority
+  };
+  let captured: MemoryToolCall | undefined;
+  const register = runtime.kernel.register.bind(runtime.kernel);
+  t.mock.method(runtime.kernel, "register", (call: MemoryToolCall) => {
+    captured = call;
+    return register(call);
+  });
+  const descriptors = createMemoryToolDescriptors(runtime.kernel);
+  const registered = await descriptors.find((tool) => tool.name === "memory.register")!.invoke({
+    scope: "current", kind: "text", content: { kind: "text", text: "FROZEN_NONCE_MARKER" },
+    visibility: "private", sensitivity: "normal", source_type: "clock-test"
+  }, context);
+  assert.equal(registered.decision, "allow_raw");
+  const searched = await descriptors.find((tool) => tool.name === "memory.search")!.invoke({
+    scope: "current", query: "FROZEN_NONCE_MARKER"
+  }, context);
+  assert.equal(searched.decision, "allow_raw");
+  assert.ok(searched.content.some((entry) => entry.text?.includes("FROZEN_NONCE_MARKER")));
+  assert.ok(captured);
+  const replay = await register(captured);
+  assert.equal(replay.decision, "malformed_request");
+  assert.equal(replay.error, "replayed authority envelope");
+  assert.equal((await new JsonlMemoryStore(root).read({ types: ["memory.registered"] })).length, 1);
 });
 
 test("tool descriptors expose provider-safe model names and execute through the kernel", async () => {

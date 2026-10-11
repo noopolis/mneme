@@ -130,7 +130,7 @@ export const appendToolOutcomeEvent = (
  * restarts against the same runtime home.
  */
 export class CausalEventStore {
-  private readonly clock: MemoryClock;
+  public readonly clock: MemoryClock;
   private static queues = new Map<string, Promise<void>>();
   private static states = new Map<string, CausalStoreState>();
   private readonly causalPath: string;

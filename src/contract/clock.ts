@@ -7,6 +7,9 @@ export interface MemoryClockOptions {
 
 export const wallClock: MemoryClock = () => Date.now();
 
+/** Default envelope lifetime, also reserved by offset-clock startup validation. */
+export const MEMORY_TOOL_ENVELOPE_TTL_MS = 5 * 60_000;
+
 export interface OffsetClockOptions {
   /** ISO-8601 instant with an explicit offset or Z. */
   origin: string;
@@ -28,9 +31,15 @@ export const createOffsetClock = ({ origin, anchorMs, realNow = wallClock }: Off
   if (!parts || !Number.isFinite(originMs) || !daysInMonth || day < 1 || day > daysInMonth) {
     throw new Error("clock origin must be a valid ISO-8601 instant with an offset or Z");
   }
-  const anchor = anchorMs ?? realNow();
+  const initialRealMs = realNow();
+  const anchor = anchorMs ?? initialRealMs;
   if (!Number.isSafeInteger(anchor)) {
     throw new Error("clock anchor must be a safe integer epoch millisecond value");
+  }
+  const initialMs = originMs + (initialRealMs - anchor);
+  if (!Number.isFinite(new Date(initialMs).getTime())
+    || !Number.isFinite(new Date(initialMs + MEMORY_TOOL_ENVELOPE_TTL_MS).getTime())) {
+    throw new Error("clock configuration produces a timestamp or envelope expiry outside JavaScript's representable date range");
   }
   return () => originMs + (realNow() - anchor);
 };

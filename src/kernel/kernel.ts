@@ -72,7 +72,10 @@ export class JsonlMemoryKernel implements MemoryKernel {
   private readonly authority: MemoryAuthorityGuard;
 
   constructor(private readonly config: MemoryKernelConfig) {
-    this.clock = config.clock ?? wallClock;
+    this.clock = config.clock ?? config.causalStore?.clock ?? wallClock;
+    if (config.causalStore && config.causalStore.clock !== this.clock) {
+      throw new Error("Mneme causal store clock must match the configured clock");
+    }
     this.store = new JsonlMemoryStore(config.runtimeHomePath, { clock: this.clock });
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
     this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath, { clock: this.clock });

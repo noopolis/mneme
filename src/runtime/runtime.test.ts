@@ -103,11 +103,11 @@ test("runtime clock reaches descriptors, mutation writes and recall-mode authori
     const registered = await descriptors.find((tool) => tool.name === "memory.register")!.invoke({
       scope: "current", kind: "text", content: { kind: "text", text: "CLOCK_WRITE_MARKER" },
       visibility: "private", sensitivity: "normal", source_type: "clock-test"
-    }, { ...context, wakeId: "daimon:clock-register" });
+    }, { ...context, wakeId: "daimon:clock-tools" });
     assert.equal(registered.decision, "allow_raw");
     const searched = await descriptors.find((tool) => tool.name === "memory.search")!.invoke({
       scope: "current", query: "CLOCK_WRITE_MARKER"
-    }, { ...context, wakeId: "daimon:clock-search" });
+    }, { ...context, wakeId: "daimon:clock-tools" });
     assert.equal(searched.decision, recallMode === "on" ? "allow_raw" : "deny");
     assert.equal(runtime.kernel.clock, clock);
     const written = await new JsonlMemoryStore(root).read();

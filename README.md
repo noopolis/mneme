@@ -103,8 +103,10 @@ const runtime = createMemoryRuntime({
 
 The runtime passes its clock to its kernel, stores and authority checks. It
 controls event `createdAt`, causal `recorded_at`, authority `consumed_at`, TTL
-visibility, envelope expiry and time-based nonces. Latency measurements and
-embedding request timeouts always use real time.
+visibility, envelope expiry and nonce timestamps. Generated nonces also include
+a random UUID so repeated calls stay distinct when the clock is frozen.
+Explicit nonces are preserved. Latency measurements and embedding request
+timeouts always use real time.
 
 Standalone construction accepts the same option:
 
@@ -118,10 +120,11 @@ Deep-time sessions inherit the clock of the store passed to
 `createDeepTimeSession(store)`. Tool descriptors inherit their kernel's clock;
 `createMemoryToolDescriptors(kernel, { clock })` and the execution context's
 `clock` can override it (context wins). Direct envelope/call builders accept
-`clock` in the execution context. Configure the same clock on independently
-supplied stores, authority guards and runtimes; wrapping one does not change its
-clock. MCP inherits a supplied runtime's clock unless the server option overrides
-it.
+`clock` in the execution context. MCP inherits a supplied runtime's clock, and
+the kernel inherits a supplied causal store's public `clock`. If an explicit
+clock is also configured, it must be the same function object as the dependency's
+clock or construction throws. Supplied MCP runtimes must expose their clock.
+Independently constructed authority guards must use that same clock as well.
 
 For `mneme mcp`, `mneme seal` and `mneme export`, the matching process options are
 `--clock-origin` / `MNEME_CLOCK_ORIGIN` and
@@ -139,8 +142,10 @@ The clock advances as `origin + (realNow - anchorMs)`. The origin must be an
 ISO-8601 instant with an explicit offset or `Z`; the optional anchor must be a
 safe integer of epoch milliseconds. Without an anchor, the CLI captures the
 time when it starts parsing configuration; the helper captures its construction
-time. The helper also accepts `realNow` for deterministic tests. Invalid values,
-missing flag values and an anchor without an origin fail startup. Sealing writes
+time. The helper also accepts `realNow` for deterministic tests. The initial
+effective timestamp and its five-minute envelope expiry must both fit within
+JavaScript's representable date range. Invalid values, missing flag values and
+an anchor without an origin fail startup. Sealing writes
 a final record without a timestamp; export copies existing evidence. Both
 preserve existing event timestamps.
 

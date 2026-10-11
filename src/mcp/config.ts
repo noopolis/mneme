@@ -1,6 +1,6 @@
 import { memoryScopeId } from "../identity/ids.js";
 import { randomUUID } from "node:crypto";
-import { createOffsetClock, wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { createOffsetClock, MEMORY_TOOL_ENVELOPE_TTL_MS, wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import type {
   MemoryPrincipalRef,
   MemoryRuntime,
@@ -31,6 +31,7 @@ export interface MnemeMcpServerConfig extends MemoryClockOptions {
   source?: string;
   tokenBudget?: number;
   embedding?: MnemeMcpEmbeddingConfig;
+  /** Must expose its clock; an explicit server clock must be the same function. */
   runtime?: MemoryRuntime;
 }
 
@@ -68,6 +69,9 @@ const createEmbeddingProvider = (
 
 export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMnemeMcpConfig => {
   const clock = config.clock ?? config.runtime?.clock ?? wallClock;
+  if (config.runtime && config.runtime.clock !== clock) {
+    throw new Error("Mneme MCP runtime clock must match the configured clock (the runtime must expose its clock)");
+  }
   const principal: MemoryPrincipalRef = {
     agentId: config.agentId,
     scope: config.agentScope ?? "global",
@@ -130,7 +134,7 @@ export const createMcpToolContext = (
     allowedScopes: config.allowedScopes,
     transport: "mcp",
     nonce: `mcp:${toolName}:${requestId}`,
-    expiresAt: new Date(now + 5 * 60_000).toISOString(),
+    expiresAt: new Date(now + MEMORY_TOOL_ENVELOPE_TTL_MS).toISOString(),
     authority: config.authority
   };
 };

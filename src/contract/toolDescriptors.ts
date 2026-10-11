@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { wallClock, type MemoryClockOptions } from "./clock.js";
+import { MEMORY_TOOL_ENVELOPE_TTL_MS, wallClock, type MemoryClockOptions } from "./clock.js";
 import type {
   MemoryExecutableToolName,
   MemoryKernel,
@@ -299,8 +299,8 @@ export const createMemoryToolEnvelope = (
     allowed_scope_aliases: aliases,
     allowed_scopes: finiteAllowedScopes(context),
     transport: context.transport ?? "in_process",
-    nonce: context.nonce ?? `${context.wakeId}:${(context.clock ?? wallClock)()}`,
-    expires_at: context.expiresAt ?? new Date((context.clock ?? wallClock)() + 5 * 60_000).toISOString(),
+    nonce: context.nonce ?? `${context.wakeId}:${(context.clock ?? wallClock)()}:${randomUUID()}`,
+    expires_at: context.expiresAt ?? new Date((context.clock ?? wallClock)() + MEMORY_TOOL_ENVELOPE_TTL_MS).toISOString(),
     capability: context.capability ?? capabilityForMode(mode)
   };
 };

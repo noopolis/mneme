@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createOffsetClock, wallClock, type MemoryClock } from "../index.js";
+import { createMemoryToolEnvelope, createOffsetClock, wallClock, type MemoryClock } from "../index.js";
 
 test("the public offset clock advances from an explicit anchor and normalizes offsets", () => {
   let realMs = 10_000;
@@ -38,6 +38,29 @@ test("offset clocks reject invalid or ambiguous origins", () => {
 test("offset clocks reject non-integer and unsafe anchors", () => {
   for (const anchorMs of [NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => createOffsetClock({ origin: "2000-01-01T00:00:00Z", anchorMs }), /clock anchor.*integer/);
+  }
+});
+
+test("offset clocks reject unrepresentable initial timestamps and envelope expiries", () => {
+  const dateLimit = 8_640_000_000_000_000;
+  const realNow = () => 0;
+  for (const initialMs of [-dateLimit, dateLimit - 300_000]) {
+    const clock = createOffsetClock({ origin: "1970-01-01T00:00:00Z", anchorMs: -initialMs, realNow });
+    assert.equal(clock(), initialMs);
+    const envelope = createMemoryToolEnvelope({
+      clock, wakeId: "daimon:boundary", threadId: "boundary",
+      principal: { agentId: "luna", scope: "global" }, conversationScope: "global"
+    });
+    assert.equal(Date.parse(envelope.expires_at), initialMs + 300_000);
+  }
+  for (const options of [
+    { origin: "2000-01-01T00:00:00Z", anchorMs: Number.MIN_SAFE_INTEGER },
+    { origin: "2000-01-01T00:00:00Z", anchorMs: Number.MAX_SAFE_INTEGER },
+    { origin: "1970-01-01T00:00:00Z", anchorMs: dateLimit + 1 },
+    { origin: "1970-01-01T00:00:00Z", anchorMs: -(dateLimit - 300_000 + 1) },
+    { origin: "+275760-09-13T00:00:00Z" }
+  ]) {
+    assert.throws(() => createOffsetClock({ ...options, realNow }), /clock configuration.*timestamp.*envelope expiry.*date range/);
   }
 });
 
