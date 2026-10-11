@@ -33,6 +33,9 @@ test("evidence CLI refuses invalid clock settings and missing values", () => {
   const cases = [
     { origin: "bad", anchor: undefined },
     { origin: "2000-01-01T00:00:00", anchor: undefined },
+    { origin: "+010000-01-01T00:00:00Z", anchor: undefined },
+    { origin: "-000001-01-01T00:00:00Z", anchor: undefined },
+    { origin: "9999-12-31T23:55:00Z", anchor: undefined },
     { origin: undefined, anchor: "100" },
     ...["", "1.5", "1e3", "Infinity", "9007199254740992"].map((anchor) => ({ origin: "2000-01-01T00:00:00Z", anchor }))
   ];
@@ -56,7 +59,7 @@ test("mneme export parses only an evidence stream selector", () => {
 test("mneme export writes finalized evidence, never raw memory content", async () => {
   const root = await temp(); const store = new CausalEventStore(root);
   await store.append({ runId: "run-a", streamId: "memory:agent-a", type: "memory.tool.outcome", principalId: "agent:agent-a", causeEventIds: ["daimon:wake"], payload: { argument_sha256: "a".repeat(64), authority_sha256: "c".repeat(64), tool: "memory.search", decision: "deny", request_sha256: "b".repeat(64) } });
-  const sealed = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
+  const sealed = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a", "--clock-origin", "2000-01-01T00:00:00Z"], {});
   assert.equal(sealed, causalEvidenceExportFilePath(root));
   const firstBytes = await readFile(sealed, "utf8");
   // Simulate a crash after the durable final but before/after publishing the
@@ -65,8 +68,9 @@ test("mneme export writes finalized evidence, never raw memory content", async (
   const retried = await runMnemeSealCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
   assert.equal(retried, sealed);
   assert.equal(await readFile(retried, "utf8"), firstBytes);
-  const written = await runMnemeExportCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a"], {});
+  const written = await runMnemeExportCommand(["--runtime-home", root, "--agent-id", "agent-a", "--run-id", "run-a", "--clock-origin", "2001-01-01T00:00:00Z"], {});
   assert.equal(written, causalEvidenceExportFilePath(root));
+  assert.equal(await readFile(written, "utf8"), firstBytes);
   assert.equal((await readFile(written, "utf8")).includes("content"), false);
 });
 

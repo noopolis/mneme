@@ -28,13 +28,13 @@ export const parseMnemeExportArgs = (argv: string[], env: NodeJS.ProcessEnv = pr
 
 export const runMnemeExportCommand = async (argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<string> => {
   const args = parseMnemeExportArgs(argv, env);
-  const result = await exportFinalizedCausalEvidence(args.runtimeHomePath, args.runId, memoryStreamId(args.agentId));
+  const result = await exportFinalizedCausalEvidence(args.runtimeHomePath, args.runId, memoryStreamId(args.agentId), args);
   return result.path;
 };
 
 /** `mneme seal` writes the authority-owned final, then exports those exact bytes. */
 export const runMnemeSealCommand = async (argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<string> => {
   const args = parseMnemeExportArgs(argv, env);
-  const result = await sealAndExportCausalEvidence(args.runtimeHomePath, args.runId, memoryStreamId(args.agentId));
+  const result = await sealAndExportCausalEvidence(args.runtimeHomePath, args.runId, memoryStreamId(args.agentId), args);
   return result.path;
 };

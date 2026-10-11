@@ -117,14 +117,16 @@ Standalone construction accepts the same option:
 - `new MemoryAuthorityGuard(runtimeHomePath, authority, { clock })`
 
 Deep-time sessions inherit the clock of the store passed to
-`createDeepTimeSession(store)`. Tool descriptors inherit their kernel's clock;
-`createMemoryToolDescriptors(kernel, { clock })` and the execution context's
-`clock` can override it (context wins). Direct envelope/call builders accept
-`clock` in the execution context. MCP inherits a supplied runtime's clock, and
-the kernel inherits a supplied causal store's public `clock`. If an explicit
-clock is also configured, it must be the same function object as the dependency's
-clock or construction throws. Supplied MCP runtimes must expose their clock.
-Independently constructed authority guards must use that same clock as well.
+`createDeepTimeSession(store, { clock })`. Tool descriptors inherit their
+kernel's clock. Descriptor options and execution contexts may specify that same
+clock, but cannot override it. Direct envelope builders accept `clock` in the
+execution context. All composition uses `resolveClock`: when no clock is
+configured or exposed, legacy dependencies without clocks retain wall time.
+Otherwise every supplied dependency must expose the identical clock function;
+an omitted option inherits that function, and mismatches throw. This applies to
+MCP runtimes and their kernels, causal stores, recall-mode wrappers, descriptors,
+and deep-time stores. Independently constructed authority guards must use that
+same clock as well.
 
 For `mneme mcp`, `mneme seal` and `mneme export`, the matching process options are
 `--clock-origin` / `MNEME_CLOCK_ORIGIN` and
@@ -144,7 +146,8 @@ safe integer of epoch milliseconds. Without an anchor, the CLI captures the
 time when it starts parsing configuration; the helper captures its construction
 time. The helper also accepts `realNow` for deterministic tests. The initial
 effective timestamp and its five-minute envelope expiry must both fit within
-JavaScript's representable date range. Invalid values, missing flag values and
+the storage-supported years 0000–9999. This validation also runs when resolving
+an injected or inherited clock. Invalid values, missing flag values and
 an anchor without an origin fail startup. Sealing writes
 a final record without a timestamp; export copies existing evidence. Both
 preserve existing event timestamps.

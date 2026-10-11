@@ -1,6 +1,7 @@
 import { selectDirtyScopes } from "../store/lifecycle.js";
 import type { MemoryStore } from "../store/store.js";
 import type { DirtyScope, MemoryEvent, MemoryEventInput } from "../contract/types.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 const DEEP_TIME_SOURCE = "mneme/deep-time";
 const DEEP_TIME_PRINCIPAL = { agentId: "mneme-deep-time", scope: "global" as const };
@@ -18,6 +19,7 @@ export interface DeepTimeConsolidation {
 }
 
 export interface DeepTimeSession {
+  readonly clock?: MemoryClock;
   selectDirtyScopes(): Promise<DirtyScope[]>;
   beginConsolidation(scope: string): Promise<DeepTimeConsolidation>;
 }
@@ -34,41 +36,45 @@ const latestSeqFor = (events: MemoryEvent[]): number =>
  * Timestamp policy belongs to the supplied store: construct it with { clock }
  * to timestamp consolidation markers using the same clock as other writes.
  */
-export const createDeepTimeSession = (store: MemoryStore): DeepTimeSession => ({
-  async selectDirtyScopes(): Promise<DirtyScope[]> {
-    const events = await store.read();
-    return selectDirtyScopes(events);
-  },
+export const createDeepTimeSession = (store: MemoryStore, options: MemoryClockOptions = {}): DeepTimeSession => {
+  const clock = resolveClock(options.clock, [store]);
+  return {
+    clock,
+    async selectDirtyScopes(): Promise<DirtyScope[]> {
+      const events = await store.read();
+      return selectDirtyScopes(events);
+    },
 
-  async beginConsolidation(scope: string): Promise<DeepTimeConsolidation> {
-    const events = await store.read({ scope });
-    // Snapshot the high-water mark at pass START (not at commit time). Any
-    // dirtying event written *during* the pass carries a seq beyond this
-    // snapshot and stays dirty afterward — this is what makes concurrent or
-    // mid-pass awake writes safely re-appear as dirty on the next pass.
-    const highWaterSeq = latestSeqFor(events);
+    async beginConsolidation(scope: string): Promise<DeepTimeConsolidation> {
+      const events = await store.read({ scope });
+      // Snapshot the high-water mark at pass START (not at commit time). Any
+      // dirtying event written *during* the pass carries a seq beyond this
+      // snapshot and stays dirty afterward — this is what makes concurrent or
+      // mid-pass awake writes safely re-appear as dirty on the next pass.
+      const highWaterSeq = latestSeqFor(events);
 
-    return {
-      highWaterSeq,
-      async commit(outputEventIds: string[]): Promise<MemoryEvent> {
-        return store.append({
-          type: "memory.consolidated",
-          principal: DEEP_TIME_PRINCIPAL,
-          scope,
-          visibility: "private",
-          source: DEEP_TIME_SOURCE,
-          content: {
-            kind: "text",
-            text: `Consolidated scope ${scope} through seq ${highWaterSeq} (${outputEventIds.length} output event(s)).`
-          },
-          tags: ["consolidated"],
-          entities: [],
-          sensitivity: "normal",
-          parentEventIds: outputEventIds,
-          origin: "system",
-          highWaterSeq
-        } satisfies MemoryEventInput);
-      }
-    };
-  }
-});
+      return {
+        highWaterSeq,
+        async commit(outputEventIds: string[]): Promise<MemoryEvent> {
+          return store.append({
+            type: "memory.consolidated",
+            principal: DEEP_TIME_PRINCIPAL,
+            scope,
+            visibility: "private",
+            source: DEEP_TIME_SOURCE,
+            content: {
+              kind: "text",
+              text: `Consolidated scope ${scope} through seq ${highWaterSeq} (${outputEventIds.length} output event(s)).`
+            },
+            tags: ["consolidated"],
+            entities: [],
+            sensitivity: "normal",
+            parentEventIds: outputEventIds,
+            origin: "system",
+            highWaterSeq
+          } satisfies MemoryEventInput);
+        }
+      };
+    }
+  };
+};

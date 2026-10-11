@@ -1,6 +1,6 @@
 import { buildWakePacketText } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
-import { wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
 import { appendMemoryRecalledEvent, appendMemoryWrittenEvent, CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
@@ -74,7 +74,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
   public readonly authority;
 
   constructor(private readonly options: JsonlMemoryRuntimeConfig) {
-    this.clock = options.clock ?? wallClock;
+    this.clock = resolveClock(options.clock);
     this.store = new JsonlMemoryStore(options.runtimeHomePath, { clock: this.clock });
     this.index = createMemoryIndex({ runtimeHomePath: options.runtimeHomePath });
     this.causalStore = new CausalEventStore(options.runtimeHomePath, { clock: this.clock });

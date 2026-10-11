@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { MEMORY_TOOL_ENVELOPE_TTL_MS, wallClock, type MemoryClockOptions } from "./clock.js";
+import { MEMORY_TOOL_ENVELOPE_TTL_MS, resolveClock, wallClock, type MemoryClockOptions } from "./clock.js";
 import type {
   MemoryExecutableToolName,
   MemoryKernel,
@@ -256,6 +256,7 @@ export const createMemoryToolDescriptors = (
   kernel: MemoryKernel,
   options: MemoryToolDescriptorsOptions = {}
 ): MemoryToolDescriptor[] => {
+  const clock = resolveClock(options.clock, [kernel]);
   const mode = options.mode ?? "awake";
   const instructions = getInstructionTextForMode(mode);
 
@@ -267,7 +268,7 @@ export const createMemoryToolDescriptors = (
         kernel,
         spec.name,
         createMemoryToolCall(spec.name, argumentsValue, {
-          ...context, clock: context.clock ?? options.clock ?? kernel.clock
+          ...context, clock: context.clock === undefined ? clock : resolveClock(context.clock, [kernel, { clock }])
         })
       )
   }));

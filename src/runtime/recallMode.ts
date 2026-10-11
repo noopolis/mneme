@@ -1,5 +1,5 @@
 import { rankCandidates, runRecall } from "../recall/recall.js";
-import type { MemoryClockOptions } from "../contract/clock.js";
+import { resolveClock, type MemoryClockOptions } from "../contract/clock.js";
 import { clampTokenBudget } from "./support.js";
 import { createHash } from "node:crypto";
 import { resolveCausalRunId } from "../contract/causal.js";
@@ -197,6 +197,7 @@ export interface RecallModeEvidenceConfig extends MemoryClockOptions {
 }
 
 export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecallMode, evidence?: RecallModeEvidenceConfig): MemoryKernel => {
+  const clock = resolveClock(evidence?.clock, [kernel, evidence?.causalStore]);
   if (mode === "on") {
     return kernel;
   }
@@ -216,7 +217,6 @@ export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecal
     }
   });
 
-  const clock = evidence?.clock ?? kernel.clock;
   const guard = evidence ? new MemoryAuthorityGuard(evidence.runtimeHomePath, evidence.authority, { clock }) : undefined;
   const unavailableRead = (call: MemoryToolCall, tool: "memory.search" | "memory.locate", startAt: number): MemoryToolResult => ({
     ...emptyResult(call, tool), decision: "unavailable", error: "memory evidence unavailable",

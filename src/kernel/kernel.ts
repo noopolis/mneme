@@ -1,5 +1,5 @@
 import { JsonlMemoryStore } from "../store/store.js";
-import { wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { appendToolOutcomeEvent, appendToolRequestEvent } from "../store/causalStore.js";
@@ -72,10 +72,7 @@ export class JsonlMemoryKernel implements MemoryKernel {
   private readonly authority: MemoryAuthorityGuard;
 
   constructor(private readonly config: MemoryKernelConfig) {
-    this.clock = config.clock ?? config.causalStore?.clock ?? wallClock;
-    if (config.causalStore && config.causalStore.clock !== this.clock) {
-      throw new Error("Mneme causal store clock must match the configured clock");
-    }
+    this.clock = resolveClock(config.clock, [config.causalStore]);
     this.store = new JsonlMemoryStore(config.runtimeHomePath, { clock: this.clock });
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
     this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath, { clock: this.clock });

@@ -10,6 +10,7 @@ import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
+import { wallClock } from "./clock.js";
 import {
   createMemoryToolDescriptors,
   createMemoryToolEnvelope,
@@ -30,6 +31,34 @@ const tempDir = async (): Promise<string> => {
 
 test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+test("tool descriptors reject clock disagreement at construction and invocation", async () => {
+  const root = await tempDir();
+  const clock = () => Date.parse("2000-01-01T00:00:00Z");
+  const runtime = createMemoryRuntime({ runtimeHomePath: root, agentId: "luna", clock });
+  const principal = { agentId: "luna", scope: "global" as const };
+  const context: MemoryToolExecutionContext = {
+    wakeId: "daimon:descriptor-clock", threadId: "descriptor-clock", principal,
+    conversationScope: memoryScopeId(principal), authority: runtime.authority
+  };
+  const args = {
+    scope: "current", kind: "text", content: { kind: "text", text: "DESCRIPTOR_CLOCK" },
+    visibility: "private", sensitivity: "normal", source_type: "clock-test"
+  };
+  for (const configured of [undefined, clock]) {
+    const descriptor = createMemoryToolDescriptors(runtime.kernel, { clock: configured })
+      .find((tool) => tool.name === "memory.register")!;
+    for (const clock of [wallClock, () => Date.parse("2000-01-01T00:00:00Z")]) {
+      assert.throws(() => descriptor.invoke(args, { ...context, clock }), /dependency clock.*match/);
+    }
+    assert.equal((await descriptor.invoke(args, { ...context, clock })).decision, "allow_raw");
+  }
+  assert.throws(() => createMemoryToolDescriptors(runtime.kernel, { clock: wallClock }), /dependency clock.*match/);
+  Object.defineProperty(runtime.kernel, "clock", { value: undefined });
+  assert.throws(() => createMemoryToolDescriptors(runtime.kernel, { clock }), /dependency clock.*match/);
+  const legacyDescriptor = createMemoryToolDescriptors(runtime.kernel)[0];
+  assert.throws(() => legacyDescriptor.invoke({}, { ...context, clock }), /dependency clock.*match/);
 });
 
 test("tool envelope nonces stay unique with frozen injected or default clocks and preserve explicit values", (t) => {

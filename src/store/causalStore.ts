@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 import {
   CAUSAL_EVENT_VERSION,
@@ -136,8 +136,8 @@ export class CausalEventStore {
   private readonly causalPath: string;
   private readonly dirPath: string;
 
-  constructor(runtimeHomePath: string, { clock = wallClock }: MemoryClockOptions = {}) {
-    this.clock = clock;
+  constructor(runtimeHomePath: string, { clock }: MemoryClockOptions = {}) {
+    this.clock = resolveClock(clock);
     this.dirPath = path.join(runtimeHomePath, "memory");
     this.causalPath = path.join(this.dirPath, "causal.jsonl");
   }

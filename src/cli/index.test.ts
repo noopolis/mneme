@@ -17,6 +17,9 @@ test("CLI refuses invalid clock settings before startup or writes", async () => 
       for (const [options, error] of [
         [["--clock-origin", "invalid"], /clock origin/],
         [["--clock-origin", "2000-01-01T00:00:00"], /clock origin/],
+        [["--clock-origin", "+010000-01-01T00:00:00Z"], /storage date range/],
+        [["--clock-origin", "-000001-01-01T00:00:00Z"], /storage date range/],
+        [["--clock-origin", "9999-12-31T23:55:00Z"], /storage date range/],
         [["--clock-anchor-ms", "123"], /requires.*clock-origin/],
         [["--clock-origin", "2000-01-01T00:00:00Z", "--clock-anchor-ms", "1.5"], /integer/]
       ] as const) {

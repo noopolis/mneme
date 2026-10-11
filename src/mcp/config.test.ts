@@ -4,10 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+process.env.NOOPOLIS_RUN_ID = "test-mcp-config";
+
 import { createMcpToolContext, parseMnemeMcpArgs, resolveMnemeMcpConfig } from "./config.js";
 import { createMemoryRuntime } from "../runtime/runtime.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { wallClock } from "../contract/clock.js";
+import { createMemoryToolDescriptors } from "../contract/toolDescriptors.js";
 
 const roots: string[] = [];
 const temp = async (): Promise<string> => { const root = await mkdtemp(path.join(os.tmpdir(), "mneme-mcp-config-")); roots.push(root); return root; };
@@ -122,7 +125,11 @@ test("clock configuration rejects unrepresentable timestamps and expiry overflow
     ["2000-01-01T00:00:00Z", "-9007199254740991"],
     ["2000-01-01T00:00:00Z", "9007199254740991"],
     ["1970-01-01T00:00:00Z", "-8639999999700001"],
-    ["+275760-09-13T00:00:00Z", undefined]
+    ["+275760-09-13T00:00:00Z", undefined],
+    ["+010000-01-01T00:00:00Z", undefined], ["-000001-01-01T00:00:00Z", undefined],
+    ["9999-12-31T23:55:00Z", undefined],
+    ["1970-01-01T00:00:00Z", String(-(Date.parse("0000-01-01T00:00:00Z") - 1))],
+    ["1970-01-01T00:00:00Z", String(-(Date.parse("9999-12-31T23:54:59.999Z") + 1))]
   ] as const) {
     const flags = ["--clock-origin", origin, ...(anchor === undefined ? [] : ["--clock-anchor-ms", anchor])];
     const error = /clock configuration.*timestamp.*envelope expiry.*date range/;
@@ -151,12 +158,32 @@ test("MCP rejects supplied runtimes with a different or unexposed clock", async 
   const runtime = createMemoryRuntime({ runtimeHomePath: root, agentId: "luna", clock });
   for (const [supplied, configured] of [
     [defaultRuntime, clock], [runtime, wallClock], [runtime, () => clock()],
-    [{ ...runtime, clock: undefined }, clock], [{ ...runtime, clock: undefined }, undefined]
+    [{ ...runtime, clock: undefined }, clock], [{ ...runtime, clock: undefined }, undefined],
+    [{ ...runtime, kernel: defaultRuntime.kernel }, undefined],
+    [{ ...runtime, kernel: { ...runtime.kernel, clock: undefined } }, clock]
   ] as const) {
     assert.throws(() => resolveMnemeMcpConfig({
       runtimeHomePath: root, agentId: "luna", runtime: supplied, clock: configured
-    }), /runtime clock.*match.*configured clock/);
+    }), /dependency clock.*match.*configured clock/);
   }
+});
+
+test("MCP preserves legacy no-clock runtimes through descriptor invocation", async () => {
+  const root = await temp();
+  const runtime = createMemoryRuntime({ runtimeHomePath: root, agentId: "luna" });
+  Object.defineProperty(runtime, "clock", { value: undefined });
+  Object.defineProperty(runtime.kernel, "clock", { value: undefined });
+  const resolved = resolveMnemeMcpConfig({ runtimeHomePath: root, agentId: "luna", runtime });
+  assert.equal(resolved.clock, wallClock);
+  const context = createMcpToolContext(resolved, "memory_search");
+  assert.equal(context.clock, undefined);
+  const descriptors = createMemoryToolDescriptors(resolved.runtime.kernel);
+  const result = await descriptors[0].invoke({ query: "legacy", scope: "current" }, context);
+  assert.equal(result.decision, "deny");
+  assert.deepEqual(result.content, []);
+  assert.throws(() => resolveMnemeMcpConfig({
+    runtimeHomePath: root, agentId: "luna", runtime, clock: wallClock
+  }), /dependency clock.*match/);
 });
 
 test("B45 MCP rejects a runtime authority from another bank or runtime home", async () => {

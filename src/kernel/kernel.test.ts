@@ -86,7 +86,7 @@ test("kernel rejects a supplied causal store with a different clock", async () =
   ] as const) {
     assert.throws(() => createMemoryKernel({
       runtimeHomePath: root, causalStore: supplied, clock: configured
-    }), /causal store clock.*match.*configured clock/);
+    }), /dependency clock.*match.*configured clock/);
   }
 });
 

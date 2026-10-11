@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { types as utilTypes } from "node:util";
-import { wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 import { canonicalJsonStringify, hashCanonicalJson, parseCanonicalJson } from "../contract/causal.js";
 import type { MemoryToolCall, MemoryToolCallEnvelope } from "../contract/types.js";
@@ -231,8 +231,8 @@ export class MemoryAuthorityGuard {
   private readonly dirPath: string;
   private readonly config?: MemoryAuthorityConfig;
 
-  constructor(runtimeHomePath: string, config?: MemoryAuthorityConfig, { clock = wallClock }: MemoryClockOptions = {}) {
-    this.clock = clock;
+  constructor(runtimeHomePath: string, config?: MemoryAuthorityConfig, { clock }: MemoryClockOptions = {}) {
+    this.clock = resolveClock(clock);
     this.dirPath = path.join(runtimeHomePath, "memory");
     this.receiptPath = path.join(this.dirPath, "authority-receipts.jsonl");
     this.receiptDir = path.join(this.dirPath, "authority-receipts");

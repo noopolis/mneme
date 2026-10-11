@@ -1,6 +1,6 @@
 import { memoryScopeId } from "../identity/ids.js";
 import { randomUUID } from "node:crypto";
-import { createOffsetClock, MEMORY_TOOL_ENVELOPE_TTL_MS, wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
+import { createOffsetClock, MEMORY_TOOL_ENVELOPE_TTL_MS, resolveClock, wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import type {
   MemoryPrincipalRef,
   MemoryRuntime,
@@ -31,7 +31,7 @@ export interface MnemeMcpServerConfig extends MemoryClockOptions {
   source?: string;
   tokenBudget?: number;
   embedding?: MnemeMcpEmbeddingConfig;
-  /** Must expose its clock; an explicit server clock must be the same function. */
+  /** Injected clocks must be exposed by both runtime and kernel as the same function. */
   runtime?: MemoryRuntime;
 }
 
@@ -68,10 +68,7 @@ const createEmbeddingProvider = (
 };
 
 export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMnemeMcpConfig => {
-  const clock = config.clock ?? config.runtime?.clock ?? wallClock;
-  if (config.runtime && config.runtime.clock !== clock) {
-    throw new Error("Mneme MCP runtime clock must match the configured clock (the runtime must expose its clock)");
-  }
+  const clock = resolveClock(config.clock, [config.runtime, config.runtime?.kernel]);
   const principal: MemoryPrincipalRef = {
     agentId: config.agentId,
     scope: config.agentScope ?? "global",
@@ -122,7 +119,8 @@ export const createMcpToolContext = (
   const requestId = randomUUID();
   return {
     mode: config.mode,
-    clock: config.clock,
+    // Do not turn the legacy wall-clock fallback into an explicit injection.
+    clock: config.runtime.clock,
     // MCP has no upstream causal parent unless the trusted deployment adapter
     // supplies one.  This is a Mneme-owned request fact, not wall-clock text.
     wakeId: `mneme:mcp-request-${requestId}`,
