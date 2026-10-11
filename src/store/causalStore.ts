@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 import {
   CAUSAL_EVENT_VERSION,
@@ -129,12 +130,14 @@ export const appendToolOutcomeEvent = (
  * restarts against the same runtime home.
  */
 export class CausalEventStore {
+  public readonly clock: MemoryClock;
   private static queues = new Map<string, Promise<void>>();
   private static states = new Map<string, CausalStoreState>();
   private readonly causalPath: string;
   private readonly dirPath: string;
 
-  constructor(runtimeHomePath: string) {
+  constructor(runtimeHomePath: string, { clock }: MemoryClockOptions = {}) {
+    this.clock = resolveClock(clock);
     this.dirPath = path.join(runtimeHomePath, "memory");
     this.causalPath = path.join(this.dirPath, "causal.jsonl");
   }
@@ -260,7 +263,7 @@ export class CausalEventStore {
         version: CAUSAL_EVENT_VERSION, run_id: durableInput.runId, event_id: eventId,
         emitter: { system: MNEME_CAUSAL_SYSTEM, stream_id: durableInput.streamId, seq },
         type: durableInput.type, principal_id: durableInput.principalId,
-        recorded_at: new Date().toISOString(), cause_event_ids: durableInput.causeEventIds,
+        recorded_at: new Date(this.clock()).toISOString(), cause_event_ids: durableInput.causeEventIds,
         payload: durableInput.payload
       };
       const validated = freezeEvidence(parseMnemeCausalEvent(event));

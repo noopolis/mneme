@@ -6,7 +6,7 @@ import test from "node:test";
 
 process.env.NOOPOLIS_RUN_ID = "test-policy-authority";
 
-import { createMemoryAuthorityHandoff, snapshotMemoryToolCall } from "./authority.js";
+import { createMemoryAuthorityHandoff, MemoryAuthorityGuard, snapshotMemoryToolCall } from "./authority.js";
 import { createMemoryKernel } from "../kernel/kernel.js";
 import { createMemoryRuntime, memoryAuthorityRuntimeId } from "../runtime/runtime.js";
 import { CausalEventStore } from "../store/causalStore.js";
@@ -38,6 +38,31 @@ const call = (
   const base = { request_id: requestId, tool: "memory.search" as const, arguments: args, envelope: unsigned };
   return { ...base, envelope: { ...unsigned, authority: handoff.issue(base) } };
 };
+
+test("authority expiry and consumed_at use the injected clock", async () => {
+  const root = await temp();
+  let now = Date.parse("2000-01-01T00:00:00Z");
+  const guard = new MemoryAuthorityGuard(root, authority, { clock: () => now });
+  const live = call({ expires_at: "2000-01-01T00:01:00Z" }, "clock-live");
+  assert.deepEqual(await guard.consume(live), live);
+  const receipt = JSON.parse((await readFile(path.join(root, "memory/authority-receipts.jsonl"), "utf8")).trim());
+  assert.equal(receipt.consumed_at, "2000-01-01T00:00:00.000Z");
+  now = Date.parse("2300-01-01T00:00:00Z");
+  await assert.rejects(guard.consume(call({ expires_at: "2300-01-01T00:00:00Z" }, "clock-expired")), /expired authority envelope/);
+  const wallGuard = new MemoryAuthorityGuard(await temp(), authority);
+  await assert.rejects(wallGuard.consume(live), /expired authority envelope/);
+});
+
+test("direct kernel clock reaches its authority and causal store; latency stays real", async (t) => {
+  const root = await temp();
+  let wallMs = Date.now();
+  t.mock.method(Date, "now", () => ++wallMs);
+  const kernel = createMemoryKernel({ runtimeHomePath: root, authority, clock: () => Date.parse("2000-01-01T00:00:00Z") });
+  const result = await kernel.search(call({ expires_at: "2000-01-01T00:01:00Z" }));
+  assert.equal(result.decision, "deny");
+  assert.ok(result.audit.latency_ms > 0 && result.audit.latency_ms < 10);
+  assert.equal((await new CausalEventStore(root).read())[0].recorded_at, "2000-01-01T00:00:00.000Z");
+});
 
 test("B45 direct kernel fails closed without a verifier and attacker envelope fields cannot be forged", async () => {
   const root = await temp();

@@ -13,6 +13,8 @@ import { UNTRUSTED_ARGUMENT_SHA256, UNTRUSTED_REQUEST_SHA256 } from "./untrusted
 import { memoryScopeId } from "../identity/ids.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import type { MemoryToolCall } from "../contract/types.js";
+import { createMemoryToolDescriptors } from "../contract/toolDescriptors.js";
+import { resolveClock, wallClock } from "../contract/clock.js";
 
 type Principal = { agentId: string; scope: "global" | "room" | "pair" | "team" | "role" | "task" | "artifact"; qualifier?: string };
 
@@ -74,6 +76,48 @@ const call = (
   const unsigned = { ...envelope(principal), nonce: `nonce:${requestId}` };
   return { request_id: requestId, tool, arguments: args, envelope: { ...unsigned, authority: testHandoff.issue({ request_id: requestId, tool, arguments: args, envelope: unsigned }) } };
 };
+
+test("kernel rejects a supplied causal store with a different clock", async () => {
+  const root = await tempDir();
+  const clock = () => Date.parse("2000-01-01T00:00:00Z");
+  const causalStore = new CausalEventStore(root, { clock });
+  for (const [supplied, configured] of [
+    [new CausalEventStore(root), clock], [causalStore, wallClock], [causalStore, () => clock()]
+  ] as const) {
+    assert.throws(() => createMemoryKernel({
+      runtimeHomePath: root, causalStore: supplied, clock: configured
+    }), /dependency clock.*match.*configured clock/);
+  }
+});
+
+test("kernel inherits the supplied causal store clock for memory and authority writes", async () => {
+  for (const explicit of [false, true]) {
+    const root = await tempDir();
+    const clock = () => Date.parse("2000-01-01T00:00:00Z");
+    const causalStore = new CausalEventStore(root, { clock });
+    const kernel = createMemoryKernel({
+      runtimeHomePath: root, causalStore, authority: TEST_AUTHORITY, ...(explicit ? { clock } : {})
+    });
+    const [register] = createMemoryToolDescriptors(kernel, { toolNames: ["memory.register"] });
+    const principal = { agentId: "agent-a", scope: "global" as const };
+    const result = await register.invoke({
+      scope: "current", kind: "text", content: { kind: "text", text: "SHARED_CLOCK_MARKER" },
+      visibility: "private", sensitivity: "normal", source_type: "clock-test"
+    }, {
+      wakeId: "daimon:shared-clock", threadId: "shared-clock-thread", principal,
+      conversationScope: memoryScopeId(principal), authority: testHandoff
+    });
+    assert.equal(result.decision, "allow_raw");
+    const events = await new JsonlMemoryStore(root).read({ types: ["memory.registered"] });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].createdAt, "2000-01-01T00:00:00.000Z");
+    const evidence = await causalStore.read();
+    assert.ok(evidence.some((event) => event.type === "memory.written"));
+    assert.ok(evidence.every((event) => event.recorded_at === events[0].createdAt));
+    assert.equal(kernel.clock, causalStore.clock);
+    assert.equal(causalStore.clock, resolveClock(clock));
+  }
+});
 
 test("search and locate do not leak private content", async () => {
   const root = await tempDir();

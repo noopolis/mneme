@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createMemoryRuntime } from "./runtime.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { createMemoryToolDescriptors } from "../contract/toolDescriptors.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
 import { validateMemoryRecalledCausalEvent, validateMemoryWrittenCausalEvent } from "../contract/causal.js";
@@ -41,6 +42,81 @@ const createFakeEmbeddingProvider = (): MemoryEmbeddingProvider => ({
 
 test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+test("runtime clock controls TTL in lexical and semantic recall, and stamps turn evidence", async () => {
+  for (const semantic of [false, true]) {
+    for (const origin of ["2000-01-01T00:00:00Z", "2300-01-01T00:00:00Z"]) {
+      const root = await tempDir();
+      let now = Date.parse(origin);
+      const clock = () => now;
+      const principal = { agentId: "agent-a", scope: "global" as const };
+      const store = new JsonlMemoryStore(root, { clock });
+      const event = await store.append({
+        type: "memory.observed", principal, scope: memoryScopeId(principal),
+        visibility: "private", source: "clock-test", ttl: "1000",
+        content: { kind: "text", text: "CLOCK_TTL_MARKER" }
+      });
+      let embeddings = 0;
+      const runtime = createMemoryRuntime({
+        agentId: principal.agentId, runtimeHomePath: root, clock, recallMode: "on",
+        ...(semantic ? { embeddingProvider: {
+          dimensions: 2, embed: async () => { embeddings += 1; return [1, 0]; }
+        } } : {})
+      });
+      const request = {
+        eventId: "daimon:clock-live", kind: "message" as const,
+        text: "CLOCK_TTL_MARKER", context: {}
+      };
+      now += 999;
+      const live = await runtime.prepareTurn(request);
+      assert.deepEqual(live.recall.selectedEventIds, [event.id]);
+      if (semantic) assert.ok(embeddings > 0);
+      now += 1;
+      const expired = await runtime.prepareTurn({ ...request, eventId: "daimon:clock-expired" });
+      assert.deepEqual(expired.recall.selectedEventIds, []);
+      await runtime.recordTurn({
+        request, principal: live.principal, prompt: live.packet, recall: live.recall,
+        result: "completed", outputText: "Clocked result."
+      });
+      const written = (await store.read()).filter((entry) => entry.id !== event.id);
+      assert.ok(written.length > 0);
+      assert.ok(written.every((entry) => entry.createdAt === new Date(now).toISOString()));
+      const evidence = await new CausalEventStore(root).read();
+      assert.ok(evidence.some((entry) => entry.type === "memory.written"));
+      assert.ok(evidence.every((entry) => [999, 1000].includes(Date.parse(entry.recorded_at) - Date.parse(origin))));
+    }
+  }
+});
+
+test("runtime clock reaches descriptors, mutation writes and recall-mode authority guards", async () => {
+  for (const recallMode of ["on", "off", "shuffled"] as const) {
+    const root = await tempDir();
+    const clock = () => Date.parse("2000-01-01T00:00:00Z");
+    const runtime = createMemoryRuntime({ agentId: "agent-a", runtimeHomePath: root, clock, recallMode });
+    const descriptors = createMemoryToolDescriptors(runtime.kernel);
+    const principal = { agentId: "agent-a", scope: "global" as const };
+    const context = {
+      threadId: "clock-test", principal, conversationScope: memoryScopeId(principal),
+      authority: runtime.authority
+    };
+    const registered = await descriptors.find((tool) => tool.name === "memory.register")!.invoke({
+      scope: "current", kind: "text", content: { kind: "text", text: "CLOCK_WRITE_MARKER" },
+      visibility: "private", sensitivity: "normal", source_type: "clock-test"
+    }, { ...context, wakeId: "daimon:clock-tools" });
+    assert.equal(registered.decision, "allow_raw");
+    const searched = await descriptors.find((tool) => tool.name === "memory.search")!.invoke({
+      scope: "current", query: "CLOCK_WRITE_MARKER"
+    }, { ...context, wakeId: "daimon:clock-tools" });
+    assert.equal(searched.decision, recallMode === "on" ? "allow_raw" : "deny");
+    assert.equal(runtime.kernel.clock, runtime.clock);
+    const written = await new JsonlMemoryStore(root).read();
+    assert.ok(written.length > 0);
+    assert.ok(written.every((event) => event.createdAt === "2000-01-01T00:00:00.000Z"));
+    const evidence = await new CausalEventStore(root).read();
+    assert.ok(evidence.length > 0);
+    assert.ok(evidence.every((event) => event.recorded_at === "2000-01-01T00:00:00.000Z"));
+  }
 });
 
 const memoryToolCall = (

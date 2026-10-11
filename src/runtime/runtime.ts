@@ -1,5 +1,6 @@
 import { buildWakePacketText } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
 import { appendMemoryRecalledEvent, appendMemoryWrittenEvent, CausalEventStore } from "../store/causalStore.js";
 import { memoryScopeId } from "../identity/ids.js";
@@ -44,7 +45,7 @@ const resolveContextFromRequest = (request: MemoryRecallRequest): WakeMemoryCont
   });
 };
 
-export interface JsonlMemoryRuntimeConfig {
+export interface JsonlMemoryRuntimeConfig extends MemoryClockOptions {
   agentId: string;
   runtimeHomePath: string;
   source?: string;
@@ -61,6 +62,7 @@ export const memoryAuthorityRuntimeId = (runtimeHomePath: string): string =>
   `runtime:${createHash("sha256").update(path.resolve(runtimeHomePath)).digest("hex")}`;
 
 export class JsonlMemoryRuntime implements MemoryRuntime {
+  public readonly clock: MemoryClock;
   private readonly store: JsonlMemoryStore;
   private readonly index: ReturnType<typeof createMemoryIndex>;
   private readonly causalStore: CausalEventStore;
@@ -72,9 +74,10 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
   public readonly authority;
 
   constructor(private readonly options: JsonlMemoryRuntimeConfig) {
-    this.store = new JsonlMemoryStore(options.runtimeHomePath);
+    this.clock = resolveClock(options.clock);
+    this.store = new JsonlMemoryStore(options.runtimeHomePath, { clock: this.clock });
     this.index = createMemoryIndex({ runtimeHomePath: options.runtimeHomePath });
-    this.causalStore = new CausalEventStore(options.runtimeHomePath);
+    this.causalStore = new CausalEventStore(options.runtimeHomePath, { clock: this.clock });
     this.embeddingProvider = options.embeddingProvider;
     this.source = options.source ?? defaultSource(options.agentId);
     this.defaultTokenBudget = clampTokenBudget(options.tokenBudget);
@@ -89,6 +92,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     this.kernel = guardKernelForRecallMode(
       createMemoryKernel({
         runtimeHomePath: options.runtimeHomePath,
+        clock: this.clock,
         source: this.source,
         embeddingProvider: this.embeddingProvider,
         // Share this runtime's own CausalEventStore rather than letting the
@@ -98,7 +102,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
         authority
       }),
       this.recallMode,
-      { runtimeHomePath: options.runtimeHomePath, authority, causalStore: this.causalStore }
+      { runtimeHomePath: options.runtimeHomePath, authority, causalStore: this.causalStore, clock: this.clock }
     );
   }
 
@@ -126,7 +130,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
     let embeddingScores: Map<string, number> | undefined;
 
     if (this.recallMode !== "off") {
-      events = recallableEvents(await readByScopes(this.store, scopeIds));
+      events = recallableEvents(await readByScopes(this.store, scopeIds), this.clock);
 
       if (this.embeddingProvider && request.text.trim().length > 0) {
         try {
@@ -140,7 +144,7 @@ export class JsonlMemoryRuntime implements MemoryRuntime {
             limit: 80
           });
 
-          const recallable = recallableEvents(indexed.map((entry) => entry.event));
+          const recallable = recallableEvents(indexed.map((entry) => entry.event), this.clock);
           if (recallable.length > 0) {
             events = recallable;
             embeddingScores = new Map(indexed.map((entry) => [entry.event.id, entry.score]));

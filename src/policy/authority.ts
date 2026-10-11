@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { types as utilTypes } from "node:util";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 import { canonicalJsonStringify, hashCanonicalJson, parseCanonicalJson } from "../contract/causal.js";
 import type { MemoryToolCall, MemoryToolCallEnvelope } from "../contract/types.js";
@@ -223,13 +224,15 @@ const parseAuthorityReceipt = (line: string): AuthorityReceipt => {
 /** Durable, secret-free replay verifier. One process queue also serializes
  * independently re-opened guards in this Node process. */
 export class MemoryAuthorityGuard {
+  private readonly clock: MemoryClock;
   private static queues = new Map<string, Promise<void>>();
   private readonly receiptPath: string;
   private readonly receiptDir: string;
   private readonly dirPath: string;
   private readonly config?: MemoryAuthorityConfig;
 
-  constructor(runtimeHomePath: string, config?: MemoryAuthorityConfig) {
+  constructor(runtimeHomePath: string, config?: MemoryAuthorityConfig, { clock }: MemoryClockOptions = {}) {
+    this.clock = resolveClock(clock);
     this.dirPath = path.join(runtimeHomePath, "memory");
     this.receiptPath = path.join(this.dirPath, "authority-receipts.jsonl");
     this.receiptDir = path.join(this.dirPath, "authority-receipts");
@@ -249,7 +252,7 @@ export class MemoryAuthorityGuard {
     }
   }
 
-  async consume(call: MemoryToolCall, now = Date.now()): Promise<MemoryToolCall> {
+  async consume(call: MemoryToolCall, now = this.clock()): Promise<MemoryToolCall> {
     if (!this.config?.secret || !this.config.bankId || !this.config.runtimeId) throw new Error("missing trusted authority verifier");
     // This executes synchronously before the first await below. Verification,
     // replay reservation, execution, and evidence all use this detached,
@@ -286,7 +289,7 @@ export class MemoryAuthorityGuard {
       if (receipts.some((receipt) => receipt.authority_hash === authorityHash || receipt.nonce_hash === nonceHash || receipt.request_hash === requestHash)) {
         throw new Error("replayed authority envelope");
       }
-      const receipt: AuthorityReceipt = { version: "mneme.authority-receipt.v1", authority_hash: authorityHash, nonce_hash: nonceHash, request_hash: requestHash, consumed_at: new Date().toISOString() };
+      const receipt: AuthorityReceipt = { version: "mneme.authority-receipt.v1", authority_hash: authorityHash, nonce_hash: nonceHash, request_hash: requestHash, consumed_at: new Date(this.clock()).toISOString() };
       // `wx` is the cross-process reservation: a second runtime can never
       // pass the read-then-append window. A partial reservation is safe — it
       // burns the authority rather than permitting a duplicate execution.

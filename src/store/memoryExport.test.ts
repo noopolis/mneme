@@ -5,12 +5,21 @@ import path from "node:path";
 import test from "node:test";
 
 import { CausalEventStore } from "./causalStore.js";
-import { causalEvidenceExportFilePath, exportFinalizedCausalEvidence } from "./memoryExport.js";
+import { causalEvidenceExportFilePath, exportFinalizedCausalEvidence, sealAndExportCausalEvidence } from "./memoryExport.js";
 import * as publicMneme from "../index.js";
 
 const roots: string[] = [];
 const temp = async (): Promise<string> => { const value = await mkdtemp(path.join(os.tmpdir(), "mneme-evidence-")); roots.push(value); return value; };
 test.afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+
+test("evidence export and seal validate their supplied clock before writing", async () => {
+  const root = await temp();
+  const clock = () => Date.parse("9999-12-31T23:55:00Z");
+  for (const command of [exportFinalizedCausalEvidence, sealAndExportCausalEvidence]) {
+    await assert.rejects(command(root, "run-a", "memory:agent-a", { clock }), /storage date range/);
+  }
+  assert.deepEqual(await new CausalEventStore(root).read(), []);
+});
 
 test("B45 evidence export requires an explicit finalized causal stream", async () => {
   const root = await temp(); const store = new CausalEventStore(root);

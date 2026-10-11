@@ -1,3 +1,4 @@
+import { resolveClock } from "../contract/clock.js";
 import { createHash } from "node:crypto";
 import { canonicalScopeKey, memoryScopeId, sanitizePrincipalQualifier } from "../identity/ids.js";
 import { hashCanonicalJson } from "../contract/causal.js";
@@ -214,7 +215,8 @@ export const resolveScope = (scopeInput: string, requester: MemoryToolCallEnvelo
  * (see policy/writeScope.ts) — one `memory.denied` ledger line (tags
  * `["denied","write"]`, mirroring the recall-side denial precedent above)
  * plus one `memory.write.denied` causal event — then returns a `deny`
- * result to the caller. Never throws. The stamped principal on both the
+ * result to the caller. Inconsistent store clocks are rejected before writes.
+ * The stamped principal on both the
  * ledger event and the causal event's `principal_id` is always the
  * envelope's own (trusted) principal, never the claimed foreign scope's
  * owner: the ledger event is written into the envelope principal's own
@@ -229,6 +231,7 @@ export const denyWriteScope = async (
   _reason: string,
   startAt: number
 ): Promise<MemoryToolResult> => {
+  resolveClock(undefined, [store, causalStore]);
   const principal = sanitizePrincipal(call.envelope.principal);
   const ownScope = resolveScope("current", principal);
 

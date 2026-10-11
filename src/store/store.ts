@@ -1,5 +1,6 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 
 import {
   canonicalScopeKey,
@@ -22,6 +23,7 @@ export interface MemoryStoreQuery {
 }
 
 export interface MemoryStore {
+  readonly clock?: MemoryClock;
   append(event: MemoryEventInput): Promise<MemoryEvent>;
   appendBatch(events: MemoryEventInput[]): Promise<MemoryEvent[]>;
   read(query?: MemoryStoreQuery): Promise<MemoryEvent[]>;
@@ -272,16 +274,18 @@ const writeDurably = async (eventsPath: string, payload: string, flag: "a" | "w"
 };
 
 export class JsonlMemoryStore implements MemoryStore {
+  public readonly clock: MemoryClock;
   private readonly eventsPath: string;
   private readonly dirPath: string;
 
-  constructor(runtimeHomePath: string) {
+  constructor(runtimeHomePath: string, { clock }: MemoryClockOptions = {}) {
+    this.clock = resolveClock(clock);
     this.dirPath = path.resolve(runtimeHomePath, "memory");
     this.eventsPath = path.join(this.dirPath, "events.jsonl");
   }
 
   private createEvent(input: MemoryEventInput, seq: number): MemoryEvent {
-    const createdAt = new Date().toISOString();
+    const createdAt = new Date(this.clock()).toISOString();
     const event: MemoryEvent = {
       id: makeEventId(),
       type: input.type,

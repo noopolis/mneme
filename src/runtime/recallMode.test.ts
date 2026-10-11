@@ -9,6 +9,7 @@ process.env.NOOPOLIS_RUN_ID = "test-runtime-recall-mode";
 import { hashCanonicalJson } from "../contract/causal.js";
 import { createMemoryAuthorityHandoff } from "../policy/authority.js";
 import { CausalEventStore } from "../store/causalStore.js";
+import { resolveClock, wallClock, type MemoryClock } from "../contract/clock.js";
 import { UNTRUSTED_ARGUMENT_SHA256, UNTRUSTED_REQUEST_SHA256 } from "../kernel/untrusted.js";
 import {
   guardKernelForRecallMode,
@@ -167,9 +168,10 @@ const countingResult = (tool: MemoryToolCall["tool"]): MemoryToolResult => ({
   }
 });
 
-const makeCountingKernel = (): { kernel: MemoryKernel; calls: string[] } => {
+const makeCountingKernel = (clock?: MemoryClock): { kernel: MemoryKernel; calls: string[] } => {
   const calls: string[] = [];
   const kernel: MemoryKernel = {
+    ...(clock === undefined ? {} : { clock }),
     search: async (call) => { calls.push("search"); return countingResult(call.tool); },
     locate: async (call) => { calls.push("locate"); return countingResult(call.tool); },
     register: async (call) => { calls.push("register"); return countingResult(call.tool); },
@@ -179,6 +181,55 @@ const makeCountingKernel = (): { kernel: MemoryKernel; calls: string[] } => {
   };
   return { kernel, calls };
 };
+
+test("direct recall-mode wrappers resolve all supplied clocks before every mode", () => {
+  const root = "/unused-clock-validation";
+  const clock = () => 0;
+  const causalStore = new CausalEventStore(root, { clock });
+  const kernel = makeCountingKernel(clock).kernel;
+  const legacy = makeCountingKernel().kernel;
+  const wallKernel = makeCountingKernel(wallClock).kernel;
+  const authority = { secret: "clock-test", bankId: "agent-a", runtimeId: "clock-test" };
+  const evidence = { runtimeHomePath: root, causalStore, authority };
+  for (const mode of ["on", "off", "shuffled"] as const) {
+    assert.equal(resolveClock(guardKernelForRecallMode(kernel, mode, evidence).clock), causalStore.clock);
+    assert.equal(resolveClock(guardKernelForRecallMode(kernel, mode, { ...evidence, clock }).clock), causalStore.clock);
+    assert.doesNotThrow(() => guardKernelForRecallMode(legacy, mode));
+    for (const [dependency, options] of [
+      [wallKernel, { ...evidence, clock }],
+      [kernel, { ...evidence, causalStore: new CausalEventStore(root), clock }],
+      [legacy, { ...evidence, clock }],
+      [kernel, { ...evidence, clock: () => 0 }],
+      [wallKernel, evidence],
+      [kernel, { ...evidence, causalStore: new CausalEventStore(root) }],
+      [legacy, evidence]
+    ] as const) {
+      assert.throws(() => guardKernelForRecallMode(dependency, mode, options), /dependency clock.*match/, mode);
+    }
+    const unexposedStore = new CausalEventStore(root);
+    Object.defineProperty(unexposedStore, "clock", { value: undefined });
+    assert.doesNotThrow(() => guardKernelForRecallMode(legacy, mode, { ...evidence, causalStore: unexposedStore }));
+    assert.throws(() => guardKernelForRecallMode(kernel, mode, {
+      ...evidence, clock, causalStore: unexposedStore
+    }), /dependency clock.*match/, mode);
+  }
+});
+
+for (const mode of ["off", "on", "shuffled"] as const) {
+  test(`legacy clockless kernels compose with default causal stores in ${mode} mode`, () => {
+    const root = "/unused-clock-validation";
+    const kernel = makeCountingKernel().kernel;
+    const causalStore = new CausalEventStore(root);
+    assert.equal(kernel.clock, undefined);
+    assert.equal(causalStore.clock, wallClock);
+    const guarded = guardKernelForRecallMode(kernel, mode, {
+      runtimeHomePath: root, causalStore,
+      authority: { secret: "clock-test", bankId: "agent-a", runtimeId: "clock-test" }
+    });
+    if (mode === "on") assert.equal(guarded, kernel);
+    else assert.equal(guarded.clock, wallClock);
+  });
+}
 
 test("guardKernelForRecallMode passes the kernel through unchanged in on mode", () => {
   const { kernel } = makeCountingKernel();

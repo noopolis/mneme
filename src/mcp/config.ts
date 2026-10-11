@@ -1,5 +1,6 @@
 import { memoryScopeId } from "../identity/ids.js";
 import { randomUUID } from "node:crypto";
+import { createOffsetClock, MEMORY_TOOL_ENVELOPE_TTL_MS, resolveClock, wallClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import type {
   MemoryPrincipalRef,
   MemoryRuntime,
@@ -17,7 +18,7 @@ export interface MnemeMcpEmbeddingConfig {
   timeoutMs?: number;
 }
 
-export interface MnemeMcpServerConfig {
+export interface MnemeMcpServerConfig extends MemoryClockOptions {
   runtimeHomePath: string;
   agentId: string;
   mode?: MemoryWakeMode;
@@ -30,12 +31,14 @@ export interface MnemeMcpServerConfig {
   source?: string;
   tokenBudget?: number;
   embedding?: MnemeMcpEmbeddingConfig;
+  /** Injected clocks must be exposed by both runtime and kernel as the same function. */
   runtime?: MemoryRuntime;
 }
 
 export interface ResolvedMnemeMcpConfig extends Required<
   Pick<MnemeMcpServerConfig, "runtimeHomePath" | "agentId" | "conversationScope" | "audienceKey" | "policyVersion" | "mode">
 > {
+  clock: MemoryClock;
   principal: MemoryPrincipalRef;
   source?: string;
   tokenBudget?: number;
@@ -65,6 +68,7 @@ const createEmbeddingProvider = (
 };
 
 export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMnemeMcpConfig => {
+  const clock = resolveClock(config.clock, [config.runtime, config.runtime?.kernel]);
   const principal: MemoryPrincipalRef = {
     agentId: config.agentId,
     scope: config.agentScope ?? "global",
@@ -72,6 +76,7 @@ export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMne
   };
 
   const runtime = config.runtime ?? createMemoryRuntime({
+    clock,
     agentId: config.agentId,
     embeddingProvider: createEmbeddingProvider(config.embedding),
     runtimeHomePath: config.runtimeHomePath,
@@ -90,6 +95,7 @@ export const resolveMnemeMcpConfig = (config: MnemeMcpServerConfig): ResolvedMne
     throw new Error("Mneme MCP requires a bounded finite allowed-scope set");
   }
   return {
+    clock,
     runtimeHomePath: config.runtimeHomePath,
     agentId: config.agentId,
     mode: config.mode ?? "awake",
@@ -109,10 +115,12 @@ export const createMcpToolContext = (
   config: ResolvedMnemeMcpConfig,
   toolName: string
 ): MemoryToolExecutionContext => {
-  const now = Date.now();
+  const now = config.clock();
   const requestId = randomUUID();
   return {
     mode: config.mode,
+    // Do not turn the legacy wall-clock fallback into an explicit injection.
+    clock: config.runtime.clock,
     // MCP has no upstream causal parent unless the trusted deployment adapter
     // supplies one.  This is a Mneme-owned request fact, not wall-clock text.
     wakeId: `mneme:mcp-request-${requestId}`,
@@ -124,15 +132,35 @@ export const createMcpToolContext = (
     allowedScopes: config.allowedScopes,
     transport: "mcp",
     nonce: `mcp:${toolName}:${requestId}`,
-    expiresAt: new Date(now + 5 * 60_000).toISOString(),
+    expiresAt: new Date(now + MEMORY_TOOL_ENVELOPE_TTL_MS).toISOString(),
     authority: config.authority
   };
+};
+
+/** Shared process clock options for MCP and the local evidence commands. */
+export const parseMnemeClockOptions = (
+  values: ReadonlyMap<string, string>,
+  env: NodeJS.ProcessEnv,
+  parsedAt: number
+): MemoryClock | undefined => {
+  const origin = values.get("clock-origin") ?? env.MNEME_CLOCK_ORIGIN;
+  const anchor = values.get("clock-anchor-ms") ?? env.MNEME_CLOCK_ANCHOR_MS;
+  if (origin === undefined && anchor !== undefined) {
+    throw new Error("--clock-anchor-ms / MNEME_CLOCK_ANCHOR_MS requires --clock-origin / MNEME_CLOCK_ORIGIN");
+  }
+  if (anchor !== undefined && !/^[+-]?\d+$/u.test(anchor)) {
+    throw new Error("--clock-anchor-ms / MNEME_CLOCK_ANCHOR_MS must be an integer epoch millisecond value");
+  }
+  return origin === undefined ? undefined : createOffsetClock({
+    origin, anchorMs: anchor === undefined ? parsedAt : Number(anchor)
+  });
 };
 
 export const parseMnemeMcpArgs = (
   argv: string[],
   env: NodeJS.ProcessEnv = process.env
 ): MnemeMcpServerConfig => {
+  const parsedAt = wallClock();
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const current = argv[index];
@@ -170,8 +198,10 @@ export const parseMnemeMcpArgs = (
   const embeddingDimensions = embeddingDimensionsText ? Number.parseInt(embeddingDimensionsText, 10) : undefined;
   const embeddingTimeoutMs = embeddingTimeoutText ? Number.parseInt(embeddingTimeoutText, 10) : undefined;
   const allowedScopesText = values.get("allowed-scopes") ?? env.MNEME_ALLOWED_SCOPES;
+  const clock = parseMnemeClockOptions(values, env, parsedAt);
 
   return {
+    ...(clock ? { clock } : {}),
     runtimeHomePath,
     agentId,
     mode: modeValue,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MEMORY_TOOL_ENVELOPE_TTL_MS, resolveClock, sampleClock, type MemoryClockOptions } from "./clock.js";
 import type {
   MemoryExecutableToolName,
   MemoryKernel,
@@ -231,7 +232,7 @@ export const getDreamMemorySkillText = (): string => DREAM_MEMORY_SKILL_TEXT;
 export const getMemorySkillTextForMode = (mode: MemoryWakeMode): string =>
   mode === "dream" ? DREAM_MEMORY_SKILL_TEXT : AWAKE_MEMORY_SKILL_TEXT;
 
-export interface MemoryToolDescriptorsOptions {
+export interface MemoryToolDescriptorsOptions extends MemoryClockOptions {
   mode?: MemoryWakeMode;
   toolNames?: ReadonlyArray<MemoryExecutableToolName>;
 }
@@ -255,6 +256,7 @@ export const createMemoryToolDescriptors = (
   kernel: MemoryKernel,
   options: MemoryToolDescriptorsOptions = {}
 ): MemoryToolDescriptor[] => {
+  const clock = resolveClock(options.clock, [kernel]);
   const mode = options.mode ?? "awake";
   const instructions = getInstructionTextForMode(mode);
 
@@ -265,7 +267,9 @@ export const createMemoryToolDescriptors = (
       executeMemoryTool(
         kernel,
         spec.name,
-        createMemoryToolCall(spec.name, argumentsValue, context)
+        createMemoryToolCall(spec.name, argumentsValue, {
+          ...context, clock: context.clock === undefined ? clock : resolveClock(context.clock, [kernel, { clock }])
+        })
       )
   }));
 };
@@ -296,8 +300,8 @@ export const createMemoryToolEnvelope = (
     allowed_scope_aliases: aliases,
     allowed_scopes: finiteAllowedScopes(context),
     transport: context.transport ?? "in_process",
-    nonce: context.nonce ?? `${context.wakeId}:${Date.now()}`,
-    expires_at: context.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
+    nonce: context.nonce ?? `${context.wakeId}:${sampleClock(context.clock)}:${randomUUID()}`,
+    expires_at: context.expiresAt ?? new Date(sampleClock(context.clock) + MEMORY_TOOL_ENVELOPE_TTL_MS).toISOString(),
     capability: context.capability ?? capabilityForMode(mode)
   };
 };

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { JsonlMemoryStore } from "./store.js";
+import { createDeepTimeSession } from "../runtime/deep-time.js";
 import type { MemoryEventInput } from "../contract/types.js";
 
 const tempRoots: string[] = [];
@@ -33,6 +34,37 @@ const observed = (text: string): MemoryEventInput => ({
 });
 
 const eventsPath = (root: string): string => path.join(root, "memory", "events.jsonl");
+
+test("createdAt uses the injected clock for append and appendBatch", async () => {
+  const root = await tempDir();
+  let now = Date.parse("2000-01-01T00:00:00.123Z");
+  const store = new JsonlMemoryStore(root, { clock: () => now });
+  const first = await store.append(observed("clocked"));
+  assert.equal(first.createdAt, "2000-01-01T00:00:00.123Z");
+  now += 1_000;
+  const batch = await store.appendBatch([observed("second"), observed("third")]);
+  assert.deepEqual(batch.map((event) => event.createdAt), ["2000-01-01T00:00:01.123Z", "2000-01-01T00:00:01.123Z"]);
+  const persisted = (await readFile(eventsPath(root), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(persisted, JSON.parse(JSON.stringify([first, ...batch])));
+});
+
+test("a store with no clock still timestamps appends at wall time", async () => {
+  const store = new JsonlMemoryStore(await tempDir());
+  const before = Date.now();
+  const event = await store.append(observed("wall time"));
+  assert.ok(Date.parse(event.createdAt) >= before && Date.parse(event.createdAt) <= Date.now());
+});
+
+test("deep-time consolidation inherits the supplied store clock", async () => {
+  let now = Date.parse("2000-01-01T00:00:00Z");
+  const store = new JsonlMemoryStore(await tempDir(), { clock: () => now });
+  const event = await store.append(observed("consolidate"));
+  const pass = await createDeepTimeSession(store).beginConsolidation(event.scope);
+  now += 1_000;
+  const marker = await pass.commit([event.id]);
+  assert.equal(marker.createdAt, "2000-01-01T00:00:01.000Z");
+  assert.equal((await store.read({ types: ["memory.consolidated"] }))[0].createdAt, marker.createdAt);
+});
 
 test("append assigns a monotonic seq starting at 1 for a fresh store", async () => {
   const root = await tempDir();

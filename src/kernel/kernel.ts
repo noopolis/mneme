@@ -1,4 +1,5 @@
 import { JsonlMemoryStore } from "../store/store.js";
+import { resolveClock, type MemoryClock, type MemoryClockOptions } from "../contract/clock.js";
 import { createMemoryIndex } from "../store/sqliteIndex.js";
 import { CausalEventStore } from "../store/causalStore.js";
 import { appendToolOutcomeEvent, appendToolRequestEvent } from "../store/causalStore.js";
@@ -44,7 +45,7 @@ import {
   UNTRUSTED_REQUEST_SHA256
 } from "./untrusted.js";
 
-export interface MemoryKernelConfig {
+export interface MemoryKernelConfig extends MemoryClockOptions {
   runtimeHomePath: string;
   source?: string;
   embeddingProvider?: MemoryEmbeddingProvider;
@@ -62,6 +63,7 @@ export interface MemoryKernelConfig {
 }
 
 export class JsonlMemoryKernel implements MemoryKernel {
+  public readonly clock: MemoryClock;
   private readonly store: JsonlMemoryStore;
   private readonly index;
   private readonly causalStore: CausalEventStore;
@@ -70,12 +72,13 @@ export class JsonlMemoryKernel implements MemoryKernel {
   private readonly authority: MemoryAuthorityGuard;
 
   constructor(private readonly config: MemoryKernelConfig) {
-    this.store = new JsonlMemoryStore(config.runtimeHomePath);
+    this.clock = resolveClock(config.clock, [config.causalStore]);
+    this.store = new JsonlMemoryStore(config.runtimeHomePath, { clock: this.clock });
     this.index = createMemoryIndex({ runtimeHomePath: config.runtimeHomePath });
-    this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath);
+    this.causalStore = config.causalStore ?? new CausalEventStore(config.runtimeHomePath, { clock: this.clock });
     this.source = this.config.source ?? `mneme/${this.config.runtimeHomePath}`;
     this.embeddingProvider = config.embeddingProvider;
-    this.authority = new MemoryAuthorityGuard(config.runtimeHomePath, config.authority);
+    this.authority = new MemoryAuthorityGuard(config.runtimeHomePath, config.authority, { clock: this.clock });
   }
 
   private async outcome(call: MemoryToolCall, tool: MemoryToolName, decision: MemoryToolResult["decision"], verified: boolean): Promise<void> {
