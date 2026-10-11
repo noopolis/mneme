@@ -1,6 +1,6 @@
 {
   "name": "@noopolis/mneme",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Noopolis scoped memory runtime and MCP tools for agentic systems.",
   "license": "MIT",
   "type": "module",
