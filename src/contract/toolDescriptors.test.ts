@@ -32,6 +32,25 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+test("tool envelope nonce and expiry use the supplied clock and preserve explicit values", (t) => {
+  const now = Date.parse("2000-01-01T00:00:00Z");
+  const context: MemoryToolExecutionContext = {
+    wakeId: "clock-wake", threadId: "clock-thread",
+    principal: { agentId: "agent-a", scope: "global" }, conversationScope: "global"
+  };
+  const envelope = createMemoryToolEnvelope({ ...context, clock: () => now });
+  assert.equal(envelope.nonce, `clock-wake:${now}`);
+  assert.equal(envelope.expires_at, "2000-01-01T00:05:00.000Z");
+  const explicit = createMemoryToolEnvelope({
+    ...context, clock: () => { throw new Error("explicit fields need no time read"); },
+    nonce: "supplied-nonce", expiresAt: "2000-01-01T00:01:00.000Z"
+  });
+  assert.equal(explicit.nonce, "supplied-nonce");
+  assert.equal(explicit.expires_at, "2000-01-01T00:01:00.000Z");
+  t.mock.method(Date, "now", () => now);
+  assert.deepEqual(createMemoryToolEnvelope(context), envelope);
+});
+
 test("tool descriptors expose provider-safe model names and execute through the kernel", async () => {
   const root = await tempDir();
   const principal = { agentId: "luna", scope: "room" as const, qualifier: "noopolis:agora" };

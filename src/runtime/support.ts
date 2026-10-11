@@ -1,4 +1,5 @@
 import { memoryScopeId } from "../identity/ids.js";
+import { wallClock, type MemoryClock } from "../contract/clock.js";
 import { memoryPolicy } from "../policy/policy.js";
 import { runRecall } from "../recall/recall.js";
 import { JsonlMemoryStore } from "../store/store.js";
@@ -94,10 +95,10 @@ const isHeadTtlExpired = (createdAt: string, ttl: string | undefined, now: numbe
  * turnAudit.ts). Name kept stable for existing callers (prepareTurn, kernel search
  * helpers via toolContract tests).
  */
-export const recallableEvents = (events: MemoryEvent[]): MemoryEvent[] => {
+export const recallableEvents = (events: MemoryEvent[], clock: MemoryClock = wallClock): MemoryEvent[] => {
   const projection = projectLifecycle(events);
   const eventsById = new Map(events.map((event) => [event.id, event]));
-  const now = Date.now();
+  const now = clock();
 
   const result: MemoryEvent[] = [];
   for (const head of projection.heads.values()) {

@@ -1,4 +1,5 @@
 import type { MemoryOrigin } from "./lifecycleTypes.js";
+import type { MemoryClock, MemoryClockOptions } from "./clock.js";
 
 export * from "./lifecycleTypes.js";
 
@@ -54,7 +55,7 @@ export type MemoryModelToolName =
   | "memory_forget"
   | "memory_promote";
 
-export interface MemoryToolExecutionContext {
+export interface MemoryToolExecutionContext extends MemoryClockOptions {
   mode?: MemoryWakeMode;
   wakeId: string;
   threadId: string;
@@ -175,6 +176,7 @@ export interface MemoryForgetArguments {
 }
 
 export interface MemoryKernel {
+  readonly clock?: MemoryClock;
   search(call: MemoryToolCall): Promise<MemoryToolResult>;
   locate(call: MemoryToolCall): Promise<MemoryToolResult>;
   register(call: MemoryToolCall): Promise<MemoryToolResult>;
@@ -367,6 +369,7 @@ export interface MemoryTurnRecord {
 }
 
 export interface MemoryRuntime {
+  readonly clock?: MemoryClock;
   prepareTurn(request: MemoryRecallRequest): Promise<MemoryPrepareTurnResult>;
   recordTurn(input: MemoryTurnRecord): Promise<void>;
   kernel: MemoryKernel;

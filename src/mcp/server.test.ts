@@ -7,10 +7,13 @@ import test from "node:test";
 process.env.NOOPOLIS_RUN_ID = "test-mcp-server";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { fileURLToPath } from "node:url";
 
 import { memoryScopeId } from "../identity/ids.js";
 import { JsonlMemoryStore } from "../store/store.js";
+import { CausalEventStore } from "../store/causalStore.js";
 import { getDreamMemoryToolInstructions } from "../contract/toolDescriptors.js";
 import { createMnemeMcpServer } from "./server.js";
 
@@ -37,6 +40,42 @@ const tempDir = async (): Promise<string> => {
 
 test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+test("stdio CLI clock flags reach stored events and authority checks", { timeout: 15_000 }, async () => {
+  const root = await tempDir();
+  const origin = Date.parse("2000-01-01T00:00:00Z");
+  const anchor = Date.now();
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--import", "tsx", fileURLToPath(new URL("../cli/index.ts", import.meta.url)),
+      "mcp", "--runtime-home", root, "--agent-id", "clock-agent",
+      "--clock-origin", "2000-01-01T00:00:00Z", "--clock-anchor-ms", String(anchor)],
+    env, stderr: "pipe"
+  });
+  const client = new Client({ name: "mneme-clock-client", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const registered = await client.callTool({ name: "memory_register", arguments: {
+      scope: "current", kind: "text", content: { kind: "text", text: "STDIO_CLOCK_MARKER" },
+      visibility: "private", sensitivity: "normal", source_type: "clock-test"
+    } });
+    const parsed = JSON.parse(firstTextContent(registered));
+    assert.equal(parsed.decision, "allow_raw");
+    const end = Date.now();
+    assert.ok(parsed.audit.latency_ms >= 0 && parsed.audit.latency_ms <= end - anchor);
+    const events = await new JsonlMemoryStore(root).read();
+    const evidence = await new CausalEventStore(root).read();
+    assert.equal(events.length, 1);
+    assert.ok(evidence.length > 0);
+    for (const timestamp of [...events.map((event) => event.createdAt), ...evidence.map((event) => event.recorded_at)]) {
+      assert.ok(Date.parse(timestamp) >= origin && Date.parse(timestamp) <= origin + end - anchor, timestamp);
+    }
+  } finally {
+    await client.close();
+    await transport.close();
+  }
 });
 
 test("MCP server lists and calls Mneme memory tools through the protocol", async () => {

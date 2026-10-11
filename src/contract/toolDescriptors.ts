@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { wallClock, type MemoryClockOptions } from "./clock.js";
 import type {
   MemoryExecutableToolName,
   MemoryKernel,
@@ -231,7 +232,7 @@ export const getDreamMemorySkillText = (): string => DREAM_MEMORY_SKILL_TEXT;
 export const getMemorySkillTextForMode = (mode: MemoryWakeMode): string =>
   mode === "dream" ? DREAM_MEMORY_SKILL_TEXT : AWAKE_MEMORY_SKILL_TEXT;
 
-export interface MemoryToolDescriptorsOptions {
+export interface MemoryToolDescriptorsOptions extends MemoryClockOptions {
   mode?: MemoryWakeMode;
   toolNames?: ReadonlyArray<MemoryExecutableToolName>;
 }
@@ -265,7 +266,9 @@ export const createMemoryToolDescriptors = (
       executeMemoryTool(
         kernel,
         spec.name,
-        createMemoryToolCall(spec.name, argumentsValue, context)
+        createMemoryToolCall(spec.name, argumentsValue, {
+          ...context, clock: context.clock ?? options.clock ?? kernel.clock
+        })
       )
   }));
 };
@@ -296,8 +299,8 @@ export const createMemoryToolEnvelope = (
     allowed_scope_aliases: aliases,
     allowed_scopes: finiteAllowedScopes(context),
     transport: context.transport ?? "in_process",
-    nonce: context.nonce ?? `${context.wakeId}:${Date.now()}`,
-    expires_at: context.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
+    nonce: context.nonce ?? `${context.wakeId}:${(context.clock ?? wallClock)()}`,
+    expires_at: context.expiresAt ?? new Date((context.clock ?? wallClock)() + 5 * 60_000).toISOString(),
     capability: context.capability ?? capabilityForMode(mode)
   };
 };

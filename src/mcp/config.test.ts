@@ -76,6 +76,54 @@ test("parseMnemeMcpArgs rejects invalid wake mode", () => {
   /mneme mcp mode must be \"awake\" or \"dream\"/);
 });
 
+const clockEnv = { MNEME_RUNTIME_HOME: "/tmp/mneme", MNEME_AGENT_ID: "clock-agent" };
+
+test("clock flags and env produce advancing clocks with flags taking precedence", (t) => {
+  let now = 10_000;
+  t.mock.method(Date, "now", () => now);
+  const env = { ...clockEnv, MNEME_CLOCK_ORIGIN: "2000-01-01T02:00:00+02:00", MNEME_CLOCK_ANCHOR_MS: "9000" };
+  const fromEnv = parseMnemeMcpArgs([], env).clock!;
+  const fromFlags = parseMnemeMcpArgs(["--clock-origin", "2001-01-01T00:00:00Z", "--clock-anchor-ms", "8000"], env).clock!;
+  assert.equal(fromEnv(), Date.parse("2000-01-01T00:00:01Z"));
+  assert.equal(fromFlags(), Date.parse("2001-01-01T00:00:02Z"));
+  now += 250;
+  assert.equal(fromEnv(), Date.parse("2000-01-01T00:00:01.250Z"));
+  assert.equal(fromFlags(), Date.parse("2001-01-01T00:00:02.250Z"));
+});
+
+test("omitted anchor uses config parse time, not first invocation time", (t) => {
+  let now = 10_000;
+  t.mock.method(Date, "now", () => now);
+  const config = parseMnemeMcpArgs(["--clock-origin", "2000-01-01T00:00:00Z"], clockEnv);
+  now += 500;
+  assert.equal(config.clock!(), Date.parse("2000-01-01T00:00:00.500Z"));
+  assert.equal(parseMnemeMcpArgs([], clockEnv).clock, undefined);
+});
+
+test("invalid clock flags and env fail parsing instead of falling back", () => {
+  const cases: Array<{ origin?: string; anchor?: string; error: RegExp }> = [
+    ...["", "bad", "2000-01-01T00:00:00", "2000-02-30T00:00:00Z"].map((origin) => ({ origin, error: /clock origin/ })),
+    ...["", "1.5", "1e3", "12ms", "NaN", "Infinity", "9007199254740992"].map((anchor) => ({ origin: "2000-01-01T00:00:00Z", anchor, error: /clock.*(?:anchor|ANCHOR).*integer/ })),
+    { anchor: "123", error: /requires.*clock-origin/ }
+  ];
+  for (const { origin, anchor, error } of cases) {
+    const flags = [...(origin === undefined ? [] : ["--clock-origin", origin]), ...(anchor === undefined ? [] : ["--clock-anchor-ms", anchor])];
+    assert.throws(() => parseMnemeMcpArgs(flags, clockEnv), error);
+    assert.throws(() => parseMnemeMcpArgs([], { ...clockEnv, MNEME_CLOCK_ORIGIN: origin, MNEME_CLOCK_ANCHOR_MS: anchor }), error);
+  }
+  assert.throws(() => parseMnemeMcpArgs(["--clock-origin"], clockEnv), /clock origin/);
+  assert.throws(() => parseMnemeMcpArgs(["--clock-origin", "2000-01-01T00:00:00Z", "--clock-anchor-ms"], clockEnv), /integer/);
+});
+
+test("MCP context and constructed runtime share the configured clock", async () => {
+  const clock = () => Date.parse("2000-01-01T00:00:00Z");
+  const resolved = resolveMnemeMcpConfig({ runtimeHomePath: await temp(), agentId: "luna", clock });
+  assert.equal(resolved.runtime.clock, clock);
+  assert.equal(createMcpToolContext(resolved, "memory_search").expiresAt, "2000-01-01T00:05:00.000Z");
+  const inherited = resolveMnemeMcpConfig({ runtimeHomePath: resolved.runtimeHomePath, agentId: "luna", runtime: resolved.runtime });
+  assert.equal(inherited.clock, clock);
+});
+
 test("B45 MCP rejects a runtime authority from another bank or runtime home", async () => {
   const first = await temp();
   const second = await temp();

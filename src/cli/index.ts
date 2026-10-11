@@ -29,6 +29,10 @@ Options (seal/export):
   mneme.causal-evidence-export.v1 bytes to
   <runtime-home>/memory/causal-evidence.jsonl. Raw memory export is retired.
 
+Clock options (mcp, seal, export):
+  --clock-origin <instant>       Advancing clock origin (ISO-8601 with offset or Z)
+  --clock-anchor-ms <integer>    Real epoch ms at origin. Default: config parse time
+
 Environment:
   MNEME_RUNTIME_HOME
   MNEME_AGENT_ID
@@ -42,6 +46,8 @@ Environment:
   MNEME_MODE
   MNEME_SOURCE
   MNEME_TOKEN_BUDGET
+  MNEME_CLOCK_ORIGIN
+  MNEME_CLOCK_ANCHOR_MS
   MNEME_EMBEDDING_PROVIDER
   MNEME_EMBEDDING_MODEL
   MNEME_EMBEDDING_BASE_URL

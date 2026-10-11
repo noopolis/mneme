@@ -82,6 +82,67 @@ Useful variables:
 - `MNEME_POLICY_VERSION`
 - `MNEME_MODE`
 - `MNEME_MODE=awake|dream`
+- `MNEME_CLOCK_ORIGIN`
+- `MNEME_CLOCK_ANCHOR_MS`
+
+## Task clock
+
+All clocks default to wall time. To replay a historical moment, pass a `clock`
+option. The public `MemoryClock` type is `() => number`, returning epoch
+milliseconds. Use a fixed function for a frozen instant, or `createOffsetClock`
+for an advancing clock:
+
+```ts
+import { createMemoryRuntime, createOffsetClock } from "@noopolis/mneme";
+
+const clock = createOffsetClock({ origin: "2000-01-01T00:00:00Z" });
+const runtime = createMemoryRuntime({
+  agentId: "agent-a", runtimeHomePath: "./.runtime/agent-a", clock
+});
+```
+
+The runtime passes its clock to its kernel, stores and authority checks. It
+controls event `createdAt`, causal `recorded_at`, authority `consumed_at`, TTL
+visibility, envelope expiry and time-based nonces. Latency measurements and
+embedding request timeouts always use real time.
+
+Standalone construction accepts the same option:
+
+- `createMemoryKernel({ runtimeHomePath, clock, ... })`
+- `createMnemeMcpServer({ runtimeHomePath, agentId, clock, ... })`
+- `new JsonlMemoryStore(runtimeHomePath, { clock })`
+- `new CausalEventStore(runtimeHomePath, { clock })`
+- `new MemoryAuthorityGuard(runtimeHomePath, authority, { clock })`
+
+Deep-time sessions inherit the clock of the store passed to
+`createDeepTimeSession(store)`. Tool descriptors inherit their kernel's clock;
+`createMemoryToolDescriptors(kernel, { clock })` and the execution context's
+`clock` can override it (context wins). Direct envelope/call builders accept
+`clock` in the execution context. Configure the same clock on independently
+supplied stores, authority guards and runtimes; wrapping one does not change its
+clock. MCP inherits a supplied runtime's clock unless the server option overrides
+it.
+
+For `mneme mcp`, `mneme seal` and `mneme export`, the matching process options are
+`--clock-origin` / `MNEME_CLOCK_ORIGIN` and
+`--clock-anchor-ms` / `MNEME_CLOCK_ANCHOR_MS`. Each flag takes precedence over its
+environment variable. For example:
+
+```bash
+mneme mcp \
+  --runtime-home ./.runtime/agent-a \
+  --agent-id agent-a \
+  --clock-origin 2000-01-01T00:00:00Z
+```
+
+The clock advances as `origin + (realNow - anchorMs)`. The origin must be an
+ISO-8601 instant with an explicit offset or `Z`; the optional anchor must be a
+safe integer of epoch milliseconds. Without an anchor, the CLI captures the
+time when it starts parsing configuration; the helper captures its construction
+time. The helper also accepts `realNow` for deterministic tests. Invalid values,
+missing flag values and an anchor without an origin fail startup. Sealing writes
+a final record without a timestamp; export copies existing evidence. Both
+preserve existing event timestamps.
 
 ## Development
 

@@ -12,6 +12,40 @@ const roots: string[] = [];
 const temp = async (): Promise<string> => { const value = await mkdtemp(path.join(os.tmpdir(), "mneme-cli-evidence-")); roots.push(value); return value; };
 test.afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
+const clockArgs = ["--runtime-home", "/tmp/mneme-clock", "--agent-id", "agent-a", "--run-id", "clock-run"];
+
+test("evidence CLI clock flags and env advance with the same semantics as MCP", (t) => {
+  let realMs = 1000;
+  t.mock.method(Date, "now", () => realMs);
+  const env = { MNEME_CLOCK_ORIGIN: "2000-01-01T02:00:00+02:00", MNEME_CLOCK_ANCHOR_MS: "500" };
+  const fromEnv = parseMnemeExportArgs(clockArgs, env).clock!;
+  const fromFlags = parseMnemeExportArgs([
+    ...clockArgs, "--clock-origin", "2001-01-01T00:00:00Z", "--clock-anchor-ms", "100"
+  ], env).clock!;
+  const implicit = parseMnemeExportArgs([...clockArgs, "--clock-origin", env.MNEME_CLOCK_ORIGIN], {}).clock!;
+  realMs += 250;
+  assert.equal(fromEnv(), Date.parse("2000-01-01T00:00:00.750Z"));
+  assert.equal(fromFlags(), Date.parse("2001-01-01T00:00:01.150Z"));
+  assert.equal(implicit(), Date.parse("2000-01-01T00:00:00.250Z"));
+});
+
+test("evidence CLI refuses invalid clock settings and missing values", () => {
+  const cases = [
+    { origin: "bad", anchor: undefined },
+    { origin: "2000-01-01T00:00:00", anchor: undefined },
+    { origin: undefined, anchor: "100" },
+    ...["", "1.5", "1e3", "Infinity", "9007199254740992"].map((anchor) => ({ origin: "2000-01-01T00:00:00Z", anchor }))
+  ];
+  for (const { origin, anchor } of cases) {
+    const flags = [...(origin === undefined ? [] : ["--clock-origin", origin]), ...(anchor === undefined ? [] : ["--clock-anchor-ms", anchor])];
+    assert.throws(() => parseMnemeExportArgs([...clockArgs, ...flags], {}), /clock/);
+    assert.throws(() => parseMnemeExportArgs(clockArgs, { MNEME_CLOCK_ORIGIN: origin, MNEME_CLOCK_ANCHOR_MS: anchor }), /clock/);
+  }
+  const env = { MNEME_CLOCK_ORIGIN: "2000-01-01T00:00:00Z", MNEME_CLOCK_ANCHOR_MS: "100" };
+  assert.throws(() => parseMnemeExportArgs([...clockArgs, "--clock-origin"], env), /clock origin/);
+  assert.throws(() => parseMnemeExportArgs([...clockArgs, "--clock-anchor-ms"], env), /integer/);
+});
+
 test("mneme export parses only an evidence stream selector", () => {
   assert.deepEqual(parseMnemeExportArgs(["--runtime-home", "/tmp/a", "--agent-id", "agent-a", "--run-id", "run-a"], {}), { runtimeHomePath: "/tmp/a", agentId: "agent-a", runId: "run-a" });
   assert.deepEqual(parseMnemeExportArgs(["--runtime-home", "/tmp/a", "--agent-id", "agent-a"], { NOOPOLIS_RUN_ID: " run-env " }), { runtimeHomePath: "/tmp/a", agentId: "agent-a", runId: "run-env" });

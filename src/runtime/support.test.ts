@@ -35,6 +35,19 @@ test.beforeEach(() => {
   seqCounter = 0;
 });
 
+test("TTL uses injected time when memory is live there but expired at wall time", () => {
+  const event = makeEvent({ type: "memory.observed", createdAt: "2000-01-01T00:00:00Z", ttl: "1000" });
+  assert.deepEqual(recallableEvents([event]), []);
+  assert.deepEqual(recallableEvents([event], () => Date.parse(event.createdAt) + 999), [event]);
+  assert.deepEqual(recallableEvents([event], () => Date.parse(event.createdAt) + 1000), []);
+});
+
+test("TTL uses injected time when memory is expired there but live at wall time", () => {
+  const event = makeEvent({ type: "memory.observed", createdAt: "2300-01-01T00:00:00Z", ttl: "1000" });
+  assert.deepEqual(recallableEvents([event]), [event]);
+  assert.deepEqual(recallableEvents([event], () => Date.parse(event.createdAt) + 1000), []);
+});
+
 test("D1: recallableEvents returns only active/promoted chain heads, excluding superseded, forgotten, and ttl-expired heads", () => {
   const root1 = makeEvent({ id: "evt_root1", type: "memory.observed" });
   const root1Rev2 = makeEvent({ id: "evt_root1_rev2", type: "memory.observed", memoryId: "evt_root1", parentEventIds: ["evt_root1"] });

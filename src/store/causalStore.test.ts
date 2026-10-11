@@ -40,6 +40,17 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+test("recorded_at uses the causal store's injected clock", async () => {
+  const root = await tempDir();
+  const store = new CausalEventStore(root, { clock: () => Date.parse("2000-01-01T00:00:00Z") });
+  const event = await store.append({
+    runId: "clock-run", streamId: "memory:agent-a", type: "memory.tool.request",
+    principalId: "agent:agent-a", causeEventIds: [], payload: requestPayload()
+  });
+  assert.equal(event.recorded_at, "2000-01-01T00:00:00.000Z");
+  assert.equal((await new CausalEventStore(root).read())[0].recorded_at, event.recorded_at);
+});
+
 test("append writes a schema-valid causal event with seq 1 for a new stream", async () => {
   const root = await tempDir();
   const store = new CausalEventStore(root);

@@ -1,4 +1,5 @@
 import { rankCandidates, runRecall } from "../recall/recall.js";
+import type { MemoryClockOptions } from "../contract/clock.js";
 import { clampTokenBudget } from "./support.js";
 import { createHash } from "node:crypto";
 import { resolveCausalRunId } from "../contract/causal.js";
@@ -189,7 +190,7 @@ export const buildShuffledRecall = (input: RecallModeInput): RecallModeResult =>
  * candidates through the tool surface. Mutating tools (register, summarize,
  * forget, promote) stay live in every mode — the ablation is recall-only.
  */
-export interface RecallModeEvidenceConfig {
+export interface RecallModeEvidenceConfig extends MemoryClockOptions {
   runtimeHomePath: string;
   authority: MemoryAuthorityConfig;
   causalStore: CausalEventStore;
@@ -215,7 +216,8 @@ export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecal
     }
   });
 
-  const guard = evidence ? new MemoryAuthorityGuard(evidence.runtimeHomePath, evidence.authority) : undefined;
+  const clock = evidence?.clock ?? kernel.clock;
+  const guard = evidence ? new MemoryAuthorityGuard(evidence.runtimeHomePath, evidence.authority, { clock }) : undefined;
   const unavailableRead = (call: MemoryToolCall, tool: "memory.search" | "memory.locate", startAt: number): MemoryToolResult => ({
     ...emptyResult(call, tool), decision: "unavailable", error: "memory evidence unavailable",
     audit: { ...emptyResult(call, tool).audit, latency_ms: Date.now() - startAt }
@@ -279,6 +281,7 @@ export const guardKernelForRecallMode = (kernel: MemoryKernel, mode: MemoryRecal
     }
   };
   return {
+    clock,
     search: (call) => deniedRead(call, "memory.search"),
     locate: (call) => deniedRead(call, "memory.locate"),
     register: (call) => kernel.register(call),

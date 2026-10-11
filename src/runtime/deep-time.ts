@@ -31,6 +31,8 @@ const latestSeqFor = (events: MemoryEvent[]): number =>
  * tool — memory.consolidated markers are written directly through the
  * store, never through the kernel/tool-call envelope path. See
  * specs burnlist B59 section 2 for the transactional high-water-mark rule.
+ * Timestamp policy belongs to the supplied store: construct it with { clock }
+ * to timestamp consolidation markers using the same clock as other writes.
  */
 export const createDeepTimeSession = (store: MemoryStore): DeepTimeSession => ({
   async selectDirtyScopes(): Promise<DirtyScope[]> {
