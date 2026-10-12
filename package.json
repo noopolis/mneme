@@ -35,7 +35,7 @@
     "clean": "rm -rf dist",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck && npm test",
-    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project .github/scripts/ci/tsconfig.json",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "emit-causal-fixture": "node --import tsx scripts/emit-causal-fixture.ts"
   },
